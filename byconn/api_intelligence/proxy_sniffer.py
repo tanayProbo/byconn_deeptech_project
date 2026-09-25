@@ -1,7 +1,6 @@
-import json
 import logging
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
-from typing import Dict, Any, List
 
 logger = logging.getLogger("byconnx.api_intel.proxy_sniffer")
 
@@ -44,14 +43,14 @@ class ProxySniffer:
         """Callback invoked when browser executes an outbound request."""
         url = request_data.get("url", "")
         method = request_data.get("method", "GET")
-        
+
         if self._is_static_asset(url):
             return
 
         endpoint = DiscoveredEndpoint(method, url)
         endpoint.request_headers = request_data.get("headers", {})
         endpoint.request_payload = request_data.get("post_data")
-        
+
         self.endpoints.append(endpoint)
         logger.debug(f"Intercepted API Call Request: {method} -> {url}")
 

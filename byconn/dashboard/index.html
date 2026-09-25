@@ -200,115 +200,35 @@
                     </div>
                 </section>
 
+                <!-- 4. API Keys Tab: live engine + dependency health -->
+                <section class="tab-panel" id="panel-api-keys">
+                    <div class="panel-header">
+                        <h3>Service Health &amp; Credentials</h3>
+                        <button class="btn btn-primary" id="refresh-health-btn">Refresh Status</button>
+                    </div>
+                    <p class="text-muted">Credentials are read from the server environment and are never sent to the browser.</p>
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Component</th>
+                                <th>Status</th>
+                                <th>Detail</th>
+                            </tr>
+                        </thead>
+                        <tbody id="health-table-body">
+                            <tr>
+                                <td colspan="3" class="text-muted">Loading engine status...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </section>
+
             </div>
         </main>
     </div>
 
     <!-- UI Interaction Scripts -->
     <script src="app.js"></script>
-    <script>
-        // Function to trigger real search against the FastAPI backend
-        async function startSearch() {
-            const input = document.getElementById('main-search-input').value;
-            const mode = document.querySelector('.ws-select').value;
-            if(!input) return;
 
-            const terminal = document.getElementById('agent-terminal-card');
-            const logStream = document.getElementById('agent-log-stream');
-            const resultArea = document.getElementById('search-result-area');
-            const quickPrompts = document.getElementById('quick-prompts');
-            
-            terminal.style.display = 'block';
-            quickPrompts.style.display = 'none';
-            resultArea.style.display = 'none';
-            logStream.innerHTML = '';
-
-            const addLog = (msg) => {
-                logStream.innerHTML += `<div class="log-line font-jet">> ${msg}</div>`;
-                logStream.scrollTop = logStream.scrollHeight;
-            };
-
-            addLog(`[SYSTEM] Initializing Agent with query: "${input}"`);
-            addLog(`[API] Sending request to BYCONN-X Backend (http://localhost:8000)...`);
-            addLog(`[WAIT] Waiting for agent to crawl, extract, and process data. This may take 10-30 seconds...`);
-
-            const startTime = Date.now();
-
-            try {
-                // Call the real FastAPI backend
-                const response = await fetch('http://localhost:8000/api/search', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ query: input, mode: mode.toLowerCase().replace(' ', '_') })
-                });
-
-                if (!response.ok) {
-                    throw new Error(`Server returned ${response.status}: ${response.statusText}`);
-                }
-
-                const data = await response.json();
-                
-                addLog(`[SUCCESS] Data received from backend.`);
-                
-                // Calculate time taken
-                const timeTaken = ((Date.now() - startTime) / 1000).toFixed(1);
-
-                // Update the UI with real data
-                resultArea.style.display = 'block';
-                document.querySelector('.res-title').innerText = data.title || `Result: ${input}`;
-                
-                // Format entities if they exist
-                let entitiesHtml = "";
-                if (data.entities && data.entities.length > 0) {
-                    entitiesHtml = `<br><br><strong>Extracted Entities:</strong><ul>`;
-                    data.entities.slice(0, 5).forEach(e => {
-                        entitiesHtml += `<li><span class="badge" style="background: #e2e8f0; color: #000;">${e.type}</span> ${e.name}</li>`;
-                    });
-                    entitiesHtml += `</ul>`;
-                }
-
-                document.querySelector('.res-snippet').innerHTML = `
-                    <strong>Summary:</strong> ${data.summary || "No summary generated."}<br><br>
-                    <strong>Topics:</strong> ${(data.topics || []).join(", ")}
-                    ${entitiesHtml}
-                    <br><br>
-                    - Extracted from: <a href="${data.url}" target="_blank">${data.url}</a>
-                `;
-                
-                document.querySelector('.res-meta').innerText = `Time taken: ${timeTaken}s | URL: ${data.url} | Mode: ${mode}`;
-
-            } catch (error) {
-                addLog(`[ERROR] Failed to fetch from backend: ${error.message}`);
-                addLog(`[INFO] Ensure your teammate's backend server is running on localhost:8000!`);
-                addLog(`[INFO] Command to run backend: python -m byconn.main`);
-            }
-        }
-
-        // Tab switching logic
-        document.querySelectorAll('.nav-item').forEach(item => {
-            item.addEventListener('click', (e) => {
-                e.preventDefault();
-                
-                // Update active nav
-                document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-                item.classList.add('active');
-
-                // Update active tab
-                const tabId = item.getAttribute('data-tab');
-                document.querySelectorAll('.tab-panel').forEach(t => t.classList.remove('active'));
-                document.getElementById('panel-' + tabId).classList.add('active');
-
-                // Update header
-                const title = item.innerText.trim();
-                document.getElementById('page-title').innerText = title;
-                
-                let subtitle = "";
-                if(tabId === "new-search") subtitle = "Command the AI Agent to fetch and analyze data.";
-                if(tabId === "history") subtitle = "Review your past queries and crawler executions.";
-                if(tabId === "saved") subtitle = "Manage exported data and saved research.";
-                document.getElementById('page-subtitle').innerText = subtitle;
-            });
-        });
-    </script>
 </body>
 </html>

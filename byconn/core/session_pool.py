@@ -1,6 +1,6 @@
 import time
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Optional
 
 logger = logging.getLogger("byconnx.core.session_pool")
 

@@ -33,7 +33,7 @@ class RequestQueue:
         async with self._lock:
             if request.unique_key in self.seen_urls:
                 return False
-            
+
             if request.depth > request.max_depth:
                 logger.debug(f"Request depth limit reached: {request.url}")
                 return False
@@ -52,7 +52,7 @@ class RequestQueue:
             for key, req in self.in_progress.items():
                 if req.lock_time and (now - req.lock_time > self.lock_duration_sec):
                     expired_keys.append(key)
-            
+
             for key in expired_keys:
                 req = self.in_progress.pop(key)
                 req.lock_time = None

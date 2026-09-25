@@ -42,7 +42,7 @@ class APISchemaDetector:
             # Gather schema inputs from list entries (sample first 5 items to limit complexity)
             for item in val[:5]:
                 item_schemas.append(self._infer_type(item))
-            
+
             # Combine items layout schema
             if not item_schemas:
                 items_schema = {"type": "string"}

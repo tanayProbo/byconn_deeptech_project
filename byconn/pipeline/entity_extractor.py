@@ -1,87 +1,84 @@
-import os
-import json
+"""Knowledge-extraction contract for the BYCONN-X pipeline.
+
+This module defines the prompt and the response schema that every extractor
+must satisfy. :class:`~byconn.pipeline.llm_extractor.LLMExtractor` is the
+concrete implementation and performs a real provider call; use it rather than
+instantiating :class:`EntityExtractor` directly.
+
+For backwards compatibility, ``LLMExtractor`` is also reachable from this
+module (resolved lazily to avoid a circular import)::
+
+    from byconn.pipeline.entity_extractor import LLMExtractor
+"""
+
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict
 
 logger = logging.getLogger("byconnx.pipeline.entity_extractor")
 
+# Response contract shared by every extractor implementation.
+ENTITY_TYPES = (
+    "ORGANIZATION", "PERSON", "PRODUCT", "TECHNOLOGY",
+    "LOCATION", "EVENT", "CONCEPT", "ENTITY",
+)
 
-class EntityExtractor:
-    """
-    AI Extraction Engine that structures unstructured markdown.
-    Extracts entities, assigns topic classification, and outputs relationship triples.
-    Requires OPENAI_API_KEY environment variable to be set.
-    """
-    def __init__(self, model: str = "gpt-4o"):
-        self.model = model
-        self._client = None
-
-    def _get_client(self):
-        """Lazily initialises the OpenAI async client."""
-        if self._client is None:
-            try:
-                from openai import AsyncOpenAI
-                api_key = os.getenv("OPENAI_API_KEY")
-                if not api_key:
-                    raise EnvironmentError(
-                        "OPENAI_API_KEY is not set. "
-                        "Add it to your .env file or environment variables."
-                    )
-                self._client = AsyncOpenAI(api_key=api_key)
-            except ImportError:
-                raise ImportError("openai not installed. Run: pip install openai")
-        return self._client
-
-    def build_extraction_prompt(self, text_content: str) -> str:
-        return f"""
+EXTRACTION_PROMPT_TEMPLATE = """
 You are a highly capable AI Knowledge Graph Specialist.
 Given the following unstructured text, extract entities, relationships, and metadata.
 
 TEXT:
 \"\"\"
-{text_content[:4000]}
+{text_content}
 \"\"\"
 
-Return a valid JSON object matching this schema exactly:
+Return a valid JSON object matching this schema:
 {{
   "entities": [
-    {{"name": "Entity Name", "type": "ORGANIZATION|PERSON|PRODUCT|TECHNOLOGY|LOCATION"}}
+    {{"name": "Entity Name", "type": "ORGANIZATION/PERSON/PRODUCT/TECHNOLOGY"}}
   ],
   "triples": [
-    {{"subject": "Subject Entity", "predicate": "RELATION_TYPE", "object": "Object Entity"}}
+    {{"subject": "Subject Entity", "predicate": "RELATION", "object": "Object Entity"}}
   ],
   "topics": ["topic1", "topic2"],
-  "summary": "One-line executive summary of the text"
+  "summary": "One-line executive summary of text"
 }}
 """
 
-    async def extract_knowledge(self, text_content: str) -> Dict[str, Any]:
-        """Sends the constructed prompt to OpenAI and returns structured JSON."""
-        prompt = self.build_extraction_prompt(text_content)
-        client = self._get_client()
 
-        try:
-            logger.info("Requesting structured entity extraction from OpenAI...")
-            response = await client.chat.completions.create(
-                model=self.model,
-                response_format={"type": "json_object"},
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=1500
-            )
-            raw = response.choices[0].message.content
-            result = json.loads(raw)
-            logger.info(
-                f"Extracted {len(result.get('entities', []))} entities, "
-                f"{len(result.get('triples', []))} triples."
-            )
-            return result
-        except Exception as e:
-            logger.error(f"Entity extraction failed: {str(e)}")
-            return {"entities": [], "triples": [], "topics": [], "summary": ""}
+class EntityExtractor:
+    """Prompt and schema definition for structured knowledge extraction.
 
-    async def extract_batch(self, texts: List[str]) -> List[Dict[str, Any]]:
-        """Runs extraction over a list of text chunks concurrently."""
-        import asyncio
-        tasks = [self.extract_knowledge(t) for t in texts]
-        return await asyncio.gather(*tasks)
+    This class is a base contract, not a usable extractor. Subclasses (see
+    :class:`~byconn.pipeline.llm_extractor.LLMExtractor`) must implement
+    :meth:`extract_knowledge`. Import ``LLMExtractor`` for real extraction.
+    """
+
+    def __init__(self, llm_client: Any = None):
+        self.llm_client = llm_client
+
+    def build_extraction_prompt(self, text_content: str) -> str:
+        """Renders the extraction prompt for the given page text."""
+        return EXTRACTION_PROMPT_TEMPLATE.format(text_content=text_content or "")
+
+    def extract_knowledge(self, text_content: str) -> Dict[str, Any]:
+        """Not implemented here.
+
+        Raises:
+            NotImplementedError: Always. Use
+                :class:`~byconn.pipeline.llm_extractor.LLMExtractor`, which
+                performs a real OpenAI/Gemini call, or pass a provider client
+                and subclass this type.
+        """
+        raise NotImplementedError(
+            "EntityExtractor defines the extraction contract only. Use "
+            "byconn.pipeline.llm_extractor.LLMExtractor for real extraction."
+        )
+
+
+def __getattr__(name: str):
+    """Resolves ``LLMExtractor`` lazily so this module can be imported first."""
+    if name == "LLMExtractor":
+        from .llm_extractor import LLMExtractor  # deferred: avoids a cycle
+
+        return LLMExtractor
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

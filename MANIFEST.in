@@ -1,0 +1,12 @@
+include LICENSE
+include README.md
+include requirements.txt
+include .env.example
+include server.py
+include conftest.py
+recursive-include byconn/dashboard *
+recursive-include byconn/deployment *
+recursive-include byconn/docs *
+# Bytecode, caches and OS metadata are excluded by setuptools by default;
+# listing them here as global-exclude only produces "no previously-included
+# files matching ..." warnings when the tree is clean.

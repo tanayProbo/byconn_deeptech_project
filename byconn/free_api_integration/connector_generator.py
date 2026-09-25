@@ -18,25 +18,25 @@ class ConnectorGenerator:
         class_name = "".join(x.capitalize() for x in api_meta["name"].replace("-", " ").replace("_", " ").split() if x.isalnum())
         if not class_name.endswith("Client"):
             class_name += "Client"
-            
+
         base_url = api_meta["base_url"]
         auth_type = api_meta.get("auth_type", "none")
-        
+
         # Build methods code snippet blocks
         methods_code = []
         endpoints: List[Dict[str, Any]] = api_meta.get("endpoints", [])
-        
+
         for ep in endpoints:
             path = ep["path"]
             method = ep.get("method", "GET").upper()
             desc = ep.get("description", "Dynamic API call endpoint.")
-            
+
             # Clean path to write clean python method names
             method_name = path.strip("/").replace("/", "_").replace(".", "_").replace("{", "").replace("}", "")
             if not method_name:
                 method_name = "get_root"
             method_name = f"{method.lower()}_{method_name}"
-            
+
             # Check if path contains path parameters like {block_hash}
             params_args = []
             url_format_string = f"f'{{self.base_url}}{path}'"
@@ -46,9 +46,9 @@ class ConnectorGenerator:
                     params_args.append(param)
                 # Format parameters inside class method args
                 url_format_string = url_format_string.replace("{", "{").replace("}", "}")
-                
+
             args_str = ", ".join(["self"] + [f"{arg}: str" for arg in params_args] + ["params: dict = None", "headers: dict = None", "data: dict = None"])
-            
+
             method_snippet = f"""    async def {method_name}({args_str}) -> dict:
         \"\"\"
         {desc}
@@ -56,10 +56,10 @@ class ConnectorGenerator:
         url = {url_format_string}
         # Injects authorization headers
         req_headers = self._build_headers(headers)
-        
+
         # Respect rate limits before firing requests
         await asyncio.sleep(self.rate_limit_delay)
-        
+
         async with self.session.request(
             method="{method}",
             url=url,
@@ -73,7 +73,7 @@ class ConnectorGenerator:
                 response_text = await response.text()
                 raise RuntimeError(f"API Request Failed: {{response.status}} - {{response_text}}")"""
             methods_code.append(method_snippet)
-            
+
         methods_str = "\n\n".join(methods_code)
 
         template = f"""# AUTO-GENERATED CLIENT CONNECTOR FOR {api_meta['name'].upper()}
@@ -112,7 +112,7 @@ class {class_name}:
         """Writes the generated class block to output target path file."""
         code = self.generate_connector_code(api_meta)
         filename = f"connector_{api_meta['id'].replace('-', '_')}.py"
-        
+
         if self.output_dir:
             os.makedirs(self.output_dir, exist_ok=True)
             target_path = os.path.join(self.output_dir, filename)
@@ -120,5 +120,5 @@ class {class_name}:
                 f.write(code)
             logger.info(f"Successfully generated and wrote client connector script: {target_path}")
             return target_path
-            
+
         return filename

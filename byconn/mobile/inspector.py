@@ -26,7 +26,7 @@ class AndroidUIInspector:
         """Dumps accessibility XML trees and maps visual components."""
         # Dump UI XML to device storage
         self.adb._execute(["shell", "uiautomator", "dump", "/data/local/tmp/uidump.xml"])
-        
+
         # Pull XML to workspace
         xml_content, _ = self.adb._execute(["shell", "cat", "/data/local/tmp/uidump.xml"])
         if not xml_content or "<hierarchy" not in xml_content:
@@ -42,16 +42,16 @@ class AndroidUIInspector:
                 focusable = attrib.get("focusable") == "true"
                 text = attrib.get("text", "").strip()
                 resource_id = attrib.get("resource-id", "")
-                
+
                 # Check for active elements
                 if clickable or focusable or text:
                     bounds_str = attrib.get("bounds", "")
                     x1, y1, x2, y2 = self._parse_bounds(bounds_str)
-                    
+
                     # Compute center coordinate
                     cx = (x1 + x2) // 2
                     cy = (y1 + y2) // 2
-                    
+
                     interactables.append({
                         "text": text,
                         "resource_id": resource_id,

@@ -1,136 +1,153 @@
 import logging
 import asyncio
-from typing import Dict, Any, List
+from typing import Any, Dict, List, Optional
 from playwright.async_api import Page
 from .dom_parser import DOMParser
+from .planner import build_planner
 
 logger = logging.getLogger("byconnx.visual_agent.agent_loop")
 
+# Pause between actions so the page can re-render before the next observation.
+STEP_DELAY_SECONDS = 1.5
+# JPEG at reduced quality keeps screenshots small enough to be vision input.
+SCREENSHOT_TYPE = "jpeg"
+SCREENSHOT_QUALITY = 60
+
+
 class VisualBrowserAgent:
     """
-    AI Browser Agent that iteratively drives web actions.
-    Uses visual screenshot captures and DOM representations to run clicks, typing, and page traversal.
+    AI browser agent that iteratively drives web actions.
+
+    Each step captures a screenshot and the interactable DOM nodes, asks a
+    planner for the next action, and performs it. When an LLM key is
+    configured the planner is model-driven; otherwise a deterministic
+    heuristic planner is used, so the agent always has a behaviour.
     """
-    def __init__(self, page: Page, llm_client: Any):
+
+    def __init__(
+        self,
+        page: Page,
+        llm_client: Any = None,
+        planner: Optional[Any] = None,
+        step_delay: float = STEP_DELAY_SECONDS,
+    ):
         self.page = page
         self.llm_client = llm_client
         self.dom_parser = DOMParser()
+        self.planner = planner if planner is not None else build_planner()
+        self.step_delay = step_delay
+        # Observation/action trace, useful for debugging and for API responses.
+        self.history: List[Dict[str, Any]] = []
 
     async def execute_task(self, prompt: str, max_steps: int = 10) -> bool:
-        """Executes browser interactions step-by-step to achieve the goal."""
+        """Executes browser interactions step-by-step to achieve the goal.
+
+        Returns ``True`` when the agent stopped early (goal reached or the
+        planner asked to stop) and ``False`` when it ran out of steps.
+        """
         logger.info(f"Visual Agent starting execution of goal: '{prompt}'")
-        
+
         for step in range(max_steps):
             logger.info(f"--- Step {step + 1}/{max_steps} ---")
-            
-            # 1. Take a screenshot for Vision model consumption
-            screenshot_bytes = await self.page.screenshot(type="png")
-            
-            # 2. Parse the interactable visual nodes
+
+            # 1. Capture a screenshot so a vision-capable planner can judge what
+            #    is actually rendered. A capture failure is not fatal: the
+            #    planner falls back to reasoning over the DOM node list.
+            screenshot_bytes = b""
+            try:
+                screenshot_bytes = await self.page.screenshot(
+                    type=SCREENSHOT_TYPE, quality=SCREENSHOT_QUALITY
+                )
+            except Exception as exc:
+                logger.debug("screenshot capture failed: %s", exc)
+
+            # 2. Parse the interactable visual nodes.
             nodes = await self.dom_parser.get_interactables(self.page)
-            
-            # 3. Request LLM decision using both screen and node coordinates
-            action = await self._decide_action(prompt, nodes, screenshot_bytes)
+
+            # 3. Ask the planner for the next action, passing the screenshot.
+            try:
+                action = await self.planner.plan(
+                    prompt, nodes, url=self.page.url, screenshot=screenshot_bytes
+                )
+            except TypeError:
+                # Planners written before the screenshot argument.
+                action = await self.planner.plan(prompt, nodes, url=self.page.url)
+            except Exception as exc:
+                logger.error("planner failed: %s", exc)
+                action = {"type": "stop"}
             logger.info(f"Agent decided action: {action}")
-            
+
+            self.history.append({
+                "step": step + 1,
+                "screenshot_bytes": len(screenshot_bytes),
+                "node_count": len(nodes),
+                "action": action,
+            })
+
             if action.get("type") == "stop":
                 logger.info("Goal reached or agent requested completion.")
                 return True
-                
-            # 4. Perform the decided action
-            await self._run_action(action)
-            await asyncio.sleep(1.5)  # Wait for page layout re-renders
-            
+
+            # 4. Perform the decided action.
+            performed = await self._run_action(action)
+            if not performed:
+                logger.info("Action could not be performed; ending the task.")
+                return False
+            await asyncio.sleep(self.step_delay)  # wait for layout to re-render
+
         logger.error("Reached maximum steps without fully executing agent task.")
         return False
 
-    async def _decide_action(self, prompt: str, nodes: List[Dict[str, Any]], screenshot: bytes) -> Dict[str, Any]:
-        """
-        Mock of LLM call. In production, this packages the screenshot as base64
-        alongside the list of interactable nodes, prompts the model, and parses a JSON response.
-        """
-        # Simplistic heuristic / Mock behavior for the skeleton
-        # If target search field is present, type. If submit exists, click.
-        for node in nodes:
-            if "search" in node["text"].lower() or "input" in node["role"]:
-                return {
-                    "type": "type",
-                    "x": node["x"],
-                    "y": node["y"],
-                    "value": "Byconn-X Data Engine GitHub"
-                }
-            if "submit" in node["text"].lower() or "enter" in node["text"].lower():
-                return {
-                    "type": "click",
-                    "x": node["x"],
-                    "y": node["y"]
-                }
-        
-        # Stop fallback if no immediate actions match
-        return {"type": "stop"}
+    async def _decide_action(
+        self, prompt: str, nodes: List[Dict[str, Any]], screenshot: bytes
+    ) -> Dict[str, Any]:
+        """Backwards-compatible wrapper around the configured planner."""
+        return await self.planner.plan(
+            prompt, nodes, url=getattr(self.page, "url", ""), screenshot=screenshot
+        )
 
-    async def _run_action(self, action: Dict[str, Any]):
-        """Executes precise coordinates-based mouse clicks and keyboard actions."""
+    async def _run_action(self, action: Dict[str, Any]) -> bool:
+        """Performs mouse/keyboard actions using element coordinates.
+
+        Returns ``False`` when the action was malformed, so the caller can end
+        the task instead of spinning on an impossible step.
+        """
         action_type = action.get("type")
-        x, y = action.get("x", 0), action.get("y", 0)
+        x, y = action.get("x"), action.get("y")
 
         if action_type == "click":
+            if x is None or y is None:
+                logger.warning("Click without coordinates; skipping.")
+                return False
             logger.info(f"Clicking coordinate: ({x}, {y})")
             await self.page.mouse.click(x, y)
-        elif action_type == "type":
-            val = action.get("value", "")
-            logger.info(f"Clicking coordinate ({x}, {y}) and typing: '{val}'")
+            return True
+
+        if action_type == "type":
+            if x is None or y is None:
+                logger.warning("Type without coordinates; skipping.")
+                return False
+            value = action.get("value", "")
+            logger.info(f"Clicking coordinate ({x}, {y}) and typing: '{value}'")
             await self.page.mouse.click(x, y)
-            await self.page.keyboard.type(val)
+            if value:
+                await self.page.keyboard.type(str(value))
             await self.page.keyboard.press("Enter")
-        elif action_type == "hover":
+            return True
+
+        if action_type == "hover":
+            if x is None or y is None:
+                logger.warning("Hover without coordinates; skipping.")
+                return False
             logger.info(f"Hovering over coordinate: ({x}, {y})")
             await self.page.mouse.move(x, y)
-        else:
-            logger.warning(f"Unrecognized action skipped: {action_type}")
-class VisualAgent:
-    """
-    User-facing facade over VisualBrowserAgent.
-    Manages the Playwright browser lifecycle so callers don't have to.
+            return True
 
-    Usage:
-        agent = VisualAgent(model="gpt-4o")
-        await agent.navigate("https://example.com")
-        await agent.act("Find the login button and click it")
-    """
-    def __init__(self, model: str = "gpt-4o", headless: bool = True):
-        self.model = model
-        self.headless = headless
-        self._playwright = None
-        self._browser = None
-        self._page = None
-        self._agent = None
+        if action_type == "scroll":
+            delta = int(action.get("delta", 600))
+            logger.info(f"Scrolling page by {delta}px")
+            await self.page.mouse.wheel(0, delta)
+            return True
 
-    async def _ensure_browser(self):
-        """Lazily initialises the Playwright browser on first use."""
-        if self._page is None:
-            from playwright.async_api import async_playwright
-            self._playwright = await async_playwright().start()
-            self._browser = await self._playwright.chromium.launch(headless=self.headless)
-            self._page = await self._browser.new_page()
-            # Stub LLM client — replace with openai.AsyncOpenAI() when key is set
-            self._agent = VisualBrowserAgent(page=self._page, llm_client=None)
-
-    async def navigate(self, url: str):
-        """Navigates the AI-controlled browser to the given URL."""
-        await self._ensure_browser()
-        await self._page.goto(url, wait_until="domcontentloaded")
-        logger.info(f"VisualAgent navigated to: {url}")
-
-    async def act(self, prompt: str, max_steps: int = 10) -> bool:
-        """Instructs the AI agent to achieve the described goal on the current page."""
-        await self._ensure_browser()
-        return await self._agent.execute_task(prompt=prompt, max_steps=max_steps)
-
-    async def close(self):
-        """Releases the browser resources."""
-        if self._browser:
-            await self._browser.close()
-        if self._playwright:
-            await self._playwright.stop()
-        logger.info("VisualAgent browser closed.")
+        logger.warning(f"Unrecognized action skipped: {action_type}")
+        return False

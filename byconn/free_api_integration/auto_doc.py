@@ -19,20 +19,20 @@ class AutoDocumenter:
         auth_type = api_meta.get("auth_type", "none")
         desc = api_meta.get("description", "No description provided.")
         endpoints: List[Dict[str, Any]] = api_meta.get("endpoints", [])
-        
+
         # Format class name
         class_name = "".join(x.capitalize() for x in api_meta["name"].replace("-", " ").replace("_", " ").split() if x.isalnum())
         if not class_name.endswith("Client"):
             class_name += "Client"
-            
+
         endpoints_section = []
         for ep in endpoints:
             endpoints_section.append(f"""### `{ep.get('method', 'GET').upper()}` `{ep['path']}`
 * **Description**: {ep.get('description', 'No description.')}
 """)
-            
+
         endpoints_md = "\n".join(endpoints_section) if endpoints_section else "No endpoints documented."
-        
+
         usage_example = f"""```python
 import asyncio
 import aiohttp
@@ -42,7 +42,7 @@ async def main():
     async with aiohttp.ClientSession() as session:
         # Initialize the generated client connector
         client = {class_name}(session=session, api_key="YOUR_API_KEY_IF_NEEDED")
-        
+
         # Execute query
         try:
             # Invokes first endpoint dynamically
@@ -55,8 +55,8 @@ asyncio.run(main())
 ```"""
 
         md = f"""# {name} — API Documentation Reference
-**Category**: {category}  
-**Base Target URL**: `{base_url}`  
+**Category**: {category}
+**Base Target URL**: `{base_url}`
 **Authentication Scheme**: `{auth_type}`
 
 ## Overview

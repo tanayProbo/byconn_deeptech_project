@@ -21,7 +21,7 @@ class ScrcpyFrameDecoder:
         try:
             self.socket.connect((self.host, self.port))
             logger.info(f"Connected to scrcpy frame server socket on {self.host}:{self.port}")
-            
+
             # Read scrcpy device metadata header
             # Format: device_name (64 bytes) + width (2 bytes) + height (2 bytes)
             metadata = self.socket.recv(68)
@@ -47,9 +47,9 @@ class ScrcpyFrameDecoder:
                 header = self.socket.recv(12)
                 if not header or len(header) < 12:
                     break
-                
+
                 pts, packet_size = struct.unpack(">Q I", header)
-                
+
                 # Fetch payload data bytes
                 payload = b""
                 while len(payload) < packet_size:
@@ -57,7 +57,7 @@ class ScrcpyFrameDecoder:
                     if not chunk:
                         break
                     payload += chunk
-                
+
                 if len(payload) == packet_size:
                     yield payload
             except socket.error as e:
@@ -79,5 +79,3 @@ class ScrcpyFrameDecoder:
         if self.socket:
             self.socket.close()
             logger.info("Scrcpy stream client disconnected.")
-class Scrcpy:
-    pass

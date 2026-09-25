@@ -25,8 +25,28 @@ class SchemaGenerator:
         except Exception:
             return {"type": "string", "description": "Failed to parse payload structured schema"}
 
-    def generate_openapi_spec(self, endpoints: List[DiscoveredEndpoint]) -> Dict[str, Any]:
-        """Constructs an OpenAPI 3.0 spec configuration out of crawled endpoints."""
+    @staticmethod
+    def is_document(endpoint: DiscoveredEndpoint) -> bool:
+        """Reports whether a captured request was a page load, not an API call.
+
+        A crawl also records the HTML document itself; including it in a
+        generated API spec would misrepresent navigation as an endpoint.
+        """
+        content_type = (endpoint.content_type or "").lower()
+        return content_type.startswith("text/html") or "xml" in content_type
+
+    def generate_openapi_spec(
+        self,
+        endpoints: List[DiscoveredEndpoint],
+        skip_documents: bool = True,
+    ) -> Dict[str, Any]:
+        """Constructs an OpenAPI 3.0 spec configuration out of crawled endpoints.
+
+        Args:
+            endpoints: Captured endpoints from a :class:`ProxySniffer`.
+            skip_documents: Drop page-load requests (HTML/XML) so the spec
+                describes only the discovered API surface.
+        """
         spec: Dict[str, Any] = {
             "openapi": "3.0.0",
             "info": {
@@ -38,11 +58,13 @@ class SchemaGenerator:
         }
 
         for ep in endpoints:
+            if skip_documents and self.is_document(ep):
+                continue
             if ep.path not in spec["paths"]:
                 spec["paths"][ep.path] = {}
 
             method_lower = ep.method.lower()
-            
+
             # Formulate JSON schemas for Request and Response payloads
             req_schema = None
             if ep.request_payload:

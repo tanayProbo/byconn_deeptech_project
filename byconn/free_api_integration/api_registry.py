@@ -1,4 +1,3 @@
-import json
 import logging
 from typing import List, Dict, Any, Optional
 
@@ -219,16 +218,16 @@ class APIRegistry:
         """Saves a new custom API metadata record into the catalog database."""
         api_id = api_data.get("id") or f"api-custom-{len(self.registry) + 1}"
         api_data["id"] = api_id
-        
+
         # Verify required keys exist
         required_keys = ["name", "base_url", "category"]
         for key in required_keys:
             if key not in api_data:
                 raise ValueError(f"Missing required metadata element for API registration: {key}")
-                
+
         if "endpoints" not in api_data:
             api_data["endpoints"] = []
-            
+
         self.registry[api_id] = api_data
         logger.info(f"Registered new public API: {api_data['name']} (ID: {api_id})")
         return api_id

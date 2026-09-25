@@ -10,9 +10,18 @@ __pycache__/
 dist/
 build/
 .eggs/
+.eggs/
+.installed.cfg
+pip-wheel-metadata/
+
+# Test & coverage artefacts
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 
 # Environments
 .env
@@ -38,6 +47,10 @@ secrets.yaml
 
 # Logs
 *.log
+
+# Generated runtime output
+byconn_output/
+openapi_*.json
 
 # Node (dashboard)
 node_modules/
