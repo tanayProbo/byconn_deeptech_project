@@ -88,6 +88,21 @@ class VisualBrowserAgent:
                 logger.info("Goal reached or agent requested completion.")
                 return True
 
+            # A page with no interactable nodes cannot be acted on. Without this
+            # guard a planner that hallucinates a coordinate (typically the
+            # origin) has every remaining step "succeed" at clicking nothing, so
+            # the run burns its whole budget and reports a misleading failure.
+            if not nodes and action.get("type") == "click" and action.get("element_id") is None:
+                logger.warning(
+                    "No interactable elements on %s and the planner proposed a "
+                    "coordinate click (%s, %s); ending the task instead of "
+                    "clicking an empty page.",
+                    getattr(self.page, "url", "?"),
+                    action.get("x"),
+                    action.get("y"),
+                )
+                return False
+
             # 4. Perform the decided action.
             performed = await self._run_action(action)
             if not performed:

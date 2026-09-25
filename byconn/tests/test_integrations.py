@@ -700,12 +700,18 @@ class _StubKeyboard:
 
 
 class _StubPage:
-    def __init__(self):
+    def __init__(self, nodes=None):
         self.url = "https://x.test/"
         self.mouse = _StubMouse()
         self.keyboard = _StubKeyboard()
         self.screenshots = 0
         self.shot_kwargs = None
+        # Interactable nodes the DOM parser will "find". Defaults to a page
+        # that has some; pass [] to model a page with nothing to click.
+        self.nodes = NODES if nodes is None else nodes
+
+    async def evaluate(self, _script):
+        return self.nodes
 
     async def screenshot(self, type="png", quality=None):
         self.screenshots += 1
@@ -761,6 +767,44 @@ class TestVisualBrowserAgent:
 
         page = _StubPage()
         run_async(self._agent(_Click(), page).execute_task("g", max_steps=3))
+        assert page.mouse.clicks == [(7, 8)]
+
+    def test_does_not_click_an_empty_page(self):
+        """Regression: a planner hallucinating a coordinate burned every step.
+
+        With no interactable nodes a coordinate click can never hit anything,
+        so the run ended by clicking the origin until the budget ran out.
+        """
+        class _Hallucinating:
+            def __init__(self):
+                self.calls = 0
+
+            async def plan(self, goal, nodes, url="", screenshot=None):
+                self.calls += 1
+                return {"type": "click", "x": 0, "y": 0}
+
+        planner = _Hallucinating()
+        page = _StubPage(nodes=[])
+        agent = self._agent(planner, page)
+
+        assert run_async(agent.execute_task("g", max_steps=5)) is False
+        assert planner.calls == 1, "it must stop after the first dead-end proposal"
+        assert page.mouse.clicks == [], "nothing should have been clicked"
+
+    def test_still_clicks_when_the_page_has_nodes(self):
+        """The empty-page guard must not disable ordinary clicking."""
+
+        class _ClickOnce:
+            def __init__(self):
+                self.calls = 0
+
+            async def plan(self, goal, nodes, url="", screenshot=None):
+                self.calls += 1
+                assert nodes, "the planner should see the page's nodes"
+                return {"type": "click", "x": 7, "y": 8} if self.calls == 1 else {"type": "stop"}
+
+        page = _StubPage()
+        assert run_async(self._agent(_ClickOnce(), page).execute_task("g", max_steps=3)) is True
         assert page.mouse.clicks == [(7, 8)]
 
     def test_performs_a_scroll(self):

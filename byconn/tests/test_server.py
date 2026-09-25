@@ -446,6 +446,75 @@ class TestDashboardAndDocs:
         # Only one tab controller: no competing inline script.
         assert "<script>" not in html, "tab logic must live in app.js only"
 
+    # --- dashboard defects found by running the page against the server -----
+
+    @staticmethod
+    def _dashboard():
+        """Reads index.html and app.js with HTML comments stripped."""
+        import pathlib
+        import re
+
+        root = pathlib.Path(server_module.__file__).resolve().parent
+        html = (root / "byconn" / "dashboard" / "index.html").read_text()
+        live = re.sub(r"<!--.*?-->", "", html, flags=re.S)
+        return live, (root / "byconn" / "dashboard" / "app.js").read_text()
+
+    def test_engine_indicator_does_not_claim_online_before_the_probe(self):
+        """It used to ship a hardcoded ONLINE that lied for the probe duration."""
+        live, js = self._dashboard()
+        assert "ONLINE" not in live.upper().split("STATUS-INDICATOR")[1][:200], (
+            "the indicator must not pre-render a success state"
+        )
+        assert "CHECKING" in live
+        # And app.js must set the pending state before awaiting the request.
+        pending = js.index('setEngineStatus("CHECKING...")')
+        awaited = js.index("await fetch(API_BASE + \"/health\")")
+        assert pending < awaited, "the pending state must be set before the await"
+
+    def test_every_live_button_has_a_handler(self):
+        """Eight decorative buttons shipped in the original layout."""
+        import re
+
+        live, js = self._dashboard()
+        labels = [
+            re.sub(r"\s+", " ", m).strip()
+            for m in re.findall(r"<button[^>]*>(.*?)</button>", live, re.S)
+        ]
+        assert labels, "expected the dashboard to keep its working buttons"
+        # Each live button is reachable either by an inline handler that
+        # setupSearch rewires, or by an addEventListener in app.js.
+        wired = ("startSearch", "clearSearch", "setupHealthIndicator",
+                 "loadDiscoveredApis")
+        for handler in wired:
+            assert handler in js, f"{handler} is missing from app.js"
+        for label in labels:
+            assert not re.search(r"\b(Export|Delete|Save|History)\b", label), (
+                f"unimplemented control is still visible: {label!r}"
+            )
+
+    def test_visual_action_mode_calls_the_agent_endpoint(self):
+        """It used to only lower max_depth, so /act was unreachable from the UI."""
+        _, js = self._dashboard()
+        assert '"Visual Action": { kind: "agent"' in js
+        assert "isAgent" in js and 'isAgent ? "act" : "crawl"' in js
+        # The agent payload must carry the task the endpoint requires.
+        assert "task: target.task" in js
+
+    def test_bare_domains_are_accepted(self):
+        """Typing example.com used to do nothing at all."""
+        _, js = self._dashboard()
+        assert "function parseTarget" in js
+        for token in ("localhost", "example.com", "https://"):
+            assert token in js
+        # The old scheme-only matcher must be gone.
+        assert "function extractUrl" not in js
+
+    def test_api_discovery_tab_is_wired_to_the_registry(self):
+        live, js = self._dashboard()
+        assert 'data-tab="api-discovery"' in live
+        assert 'id="panel-api-discovery"' in live
+        assert "${API_BASE}/apis" in js
+
     def test_openapi_documents_the_contract(self, client):
         spec = client.get("/openapi.json").json()
         assert "/api/v1/crawl" in spec["paths"]

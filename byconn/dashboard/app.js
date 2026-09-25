@@ -27,17 +27,24 @@ const TAB_META = {
     "api-keys": {
         title: "API Keys",
         subtitle: "Inspect the engine health and service credentials."
+    },
+    "api-discovery": {
+        title: "API Discovery",
+        subtitle: "REST endpoints sniffed from previous crawls."
     }
 };
 
 let activeJobId = null;
 let pollTimer = null;
+let activeMode = null;
 
-// The Agent Mode selector drives how far the crawl follows links.
-const MODE_DEPTH = {
-    "Deep Research": 2,
-    "Fast Scrape": 1,
-    "Visual Action": 0
+// The Agent Mode selector picks which backend runs the request. Crawl modes
+// post to /crawl; Visual Action drives the browser agent through /act, which is
+// a genuinely different pipeline rather than a shallower crawl.
+const MODES = {
+    "Deep Research": { kind: "crawl", depth: 2 },
+    "Fast Scrape": { kind: "crawl", depth: 1 },
+    "Visual Action": { kind: "agent", steps: 3 }
 };
 
 let initialized = false;
@@ -51,6 +58,7 @@ document.addEventListener("DOMContentLoaded", () => {
     setupSearch();
     wireHealthRefresh();
     setupHealthIndicator();
+    wireApiDiscovery();
 });
 
 /* ------------------------------------------------------------------ tabs */
@@ -117,16 +125,21 @@ async function startSearch() {
     const query = input.value.trim();
     if (!query) return;
 
-    const url = extractUrl(query);
-    if (!url) {
-        logLine("Provide a target URL, for example https://example.com", "warn");
+    const target = parseTarget(query);
+    if (!target.url) {
+        logLine(
+            "Could not find a target. Enter a URL such as example.com, " +
+            "optionally followed by what you want done with it.",
+            "warn"
+        );
         return;
     }
 
     // Honour the Agent Mode selector instead of ignoring it.
     const modeEl = document.querySelector(".ws-select");
     const mode = modeEl ? modeEl.value : "Fast Scrape";
-    const maxDepth = MODE_DEPTH[mode] !== undefined ? MODE_DEPTH[mode] : 1;
+    const config = MODES[mode] || MODES["Fast Scrape"];
+    activeMode = mode;
 
     const terminal = document.getElementById("agent-terminal-card");
     const logStream = document.getElementById("agent-log-stream");
@@ -138,25 +151,43 @@ async function startSearch() {
     if (resultArea) resultArea.style.display = "none";
     if (logStream) logStream.innerHTML = "";
 
-    logLine(`[SYSTEM] Agent mode: ${mode} (max_depth=${maxDepth})`, "system");
-    logLine(`[SYSTEM] Submitting crawl request for ${url}`, "system");
+    if (config.kind === "agent") {
+        logLine(`[SYSTEM] Agent mode: ${mode} (max_steps=${config.steps})`, "system");
+    } else {
+        logLine(`[SYSTEM] Crawl mode: ${mode} (max_depth=${config.depth})`, "system");
+    }
+    logLine(`[SYSTEM] Target: ${target.url}`, "system");
+    if (target.task) {
+        logLine(`[SYSTEM] Task: ${target.task}`, "system");
+    }
     stopPolling();
 
+    const isAgent = config.kind === "agent";
+    // The agent endpoint requires a task, so fall back to a neutral default
+    // when the operator only supplied a URL.
+    const body = isAgent
+        ? {
+            url: target.url,
+            task: target.task || "Inspect the page and report what it offers",
+            max_steps: config.steps
+        }
+        : { url: target.url, max_depth: config.depth };
+
     try {
-        const response = await fetch(`${API_BASE}/crawl`, {
+        const response = await fetch(`${API_BASE}/${isAgent ? "act" : "crawl"}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ url: url, max_depth: maxDepth })
+            body: JSON.stringify(body)
         });
         if (!response.ok) {
             const detail = await response.text();
-            logLine(`[ERROR] Crawl rejected (${response.status}): ${detail}`, "error");
+            logLine(`[ERROR] Request rejected (${response.status}): ${detail}`, "error");
             return;
         }
         const job = await response.json();
         activeJobId = job.job_id;
         logLine(`[SYSTEM] Job ${job.job_id} accepted`, "system");
-        startPolling(job.job_id);
+        startPolling(job.job_id, isAgent);
     } catch (error) {
         logLine(`[ERROR] Could not reach the engine: ${error.message}`, "error");
     }
@@ -174,33 +205,83 @@ function clearSearch() {
     if (quickPrompts) quickPrompts.style.display = "";
 }
 
-function extractUrl(text) {
-    const match = text.match(/https?:\/\/[^\s"'<>]+/i);
-    return match ? match[0] : null;
+/**
+ * Splits free text into a target URL and an optional task.
+ *
+ * Accepts a bare domain ("example.com"), a full URL, or an instruction that
+ * embeds one ("extract pricing from https://stripe.com/pricing"). The scheme
+ * is defaulted to https when omitted, so a plain domain is not silently
+ * rejected. The surrounding prose becomes the task, so the placeholder text in
+ * the search box is not thrown away.
+ */
+function parseTarget(text) {
+    const raw = (text || "").trim();
+    if (!raw) return { url: null, task: "" };
+
+    // Prefer an explicit http(s) URL anywhere in the text.
+    const explicit = raw.match(/https?:\/\/[^\s"'<>]+/i);
+    if (explicit) {
+        const url = explicit[0].replace(/[.,;:)\]]+$/, "");
+        const task = (raw.replace(explicit[0], " ")).replace(/\s+/g, " ").trim();
+        return { url, task };
+    }
+
+    // Otherwise accept a bare host: a dotted domain, localhost, or an IPv4
+    // literal, each with an optional port and path. A dotted domain must end in
+    // a real TLD so prose containing a version number ("version 1.2") or a file
+    // name is not mistaken for a host.
+    const bare = raw.match(
+        /(?:^|\s)(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}|localhost|\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?(?:\/[^\s"'<>]*)?/i
+    );
+    if (bare) {
+        const host = bare[0].trim();
+        const task = (raw.replace(bare[0], " ")).replace(/\s+/g, " ").trim();
+        // A bare host is ambiguous. Public sites are reached over https;
+        // localhost and raw IP literals are conventionally plain http. Compare
+        // the hostname only, so a port or path does not defeat the test.
+        const hostname = host.split(":")[0].split("/")[0].toLowerCase();
+        const local = hostname === "localhost" || /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname);
+        return { url: `${local ? "http" : "https"}://${host}`, task };
+    }
+
+    return { url: null, task: "" };
 }
 
-function startPolling(jobId) {
+function startPolling(jobId, isAgent) {
     stopPolling();
+    const path = isAgent ? "act" : "crawl";
     pollTimer = setInterval(async () => {
         try {
-            const response = await fetch(`${API_BASE}/crawl/${jobId}`);
+            const response = await fetch(`${API_BASE}/${path}/${jobId}`);
             if (!response.ok) {
                 logLine(`[WARN] Status check failed (${response.status})`, "warn");
                 return;
             }
             const job = await response.json();
-            logLine(
-                `[CRAWLER] ${job.status} - pages ${job.pages_crawled}, ` +
-                `saved ${job.pages_saved}, vectors ${job.chunks_indexed}, ` +
-                `entities ${job.entities_extracted}, relations ${job.relations_written}`,
-                job.status === "failed" ? "error" : "system"
-            );
+            if (isAgent) {
+                logLine(
+                    `[AGENT] ${job.status} - step ${job.steps_taken}` +
+                    `${job.max_steps !== undefined ? "/" + job.max_steps : ""}` +
+                    `, endpoints discovered ${job.endpoints_discovered || 0}`,
+                    job.status === "failed" ? "error" : "system"
+                );
+            } else {
+                logLine(
+                    `[CRAWLER] ${job.status} - pages ${job.pages_crawled}, ` +
+                    `saved ${job.pages_saved}, vectors ${job.chunks_indexed}, ` +
+                    `entities ${job.entities_extracted}, relations ${job.relations_written}`,
+                    job.status === "failed" ? "error" : "system"
+                );
+            }
             (job.errors || []).forEach((message) => logLine(`[WARN] ${message}`, "warn"));
 
             if (["succeeded", "failed", "cancelled"].includes(job.status)) {
                 stopPolling();
-                logLine(`[SYSTEM] Job ${job.job_id} ${job.status}`, "system");
-                renderResult(job);
+                const outcome = isAgent && job.succeeded === false && job.status === "succeeded"
+                    ? "finished without completing the task"
+                    : job.status;
+                logLine(`[SYSTEM] Job ${job.job_id} ${outcome}`, "system");
+                renderResult(job, isAgent);
             }
         } catch (error) {
             logLine(`[ERROR] Polling failed: ${error.message}`, "error");
@@ -216,9 +297,32 @@ function stopPolling() {
     }
 }
 
-function renderResult(job) {
+function renderResult(job, isAgent) {
     const resultArea = document.getElementById("search-result-area");
     if (!resultArea) return;
+
+    if (isAgent) {
+        resultArea.style.display = "block";
+        const title = resultArea.querySelector(".res-title");
+        if (title) title.textContent = `Agent run: ${job.url}`;
+        const snippet = resultArea.querySelector(".res-snippet");
+        if (snippet) {
+            snippet.innerHTML =
+                `Task: <b>${escapeHtml(job.task || "-")}</b><br><br>` +
+                `Steps taken: <b>${job.steps_taken ?? 0}</b><br><br>` +
+                `Task completed: <b>${job.succeeded ? "yes" : "no"}</b><br><br>` +
+                `API endpoints discovered: <b>${job.endpoints_discovered || 0}</b><br><br>` +
+                `- Job: ${job.job_id}`;
+        }
+        const meta = resultArea.querySelector(".res-meta");
+        if (meta) {
+            meta.textContent =
+                `Duration: ${job.duration_seconds ?? "n/a"}s | ` +
+                `Mode: ${activeMode || "Visual Action"} | Status: ${job.status}`;
+        }
+        return;
+    }
+
     if (job.status !== "succeeded" || job.pages_crawled === 0) {
         logLine(`[SYSTEM] No pages were retrieved for ${job.url}`, "warn");
         return;
@@ -298,40 +402,156 @@ function renderHealthTable(health) {
     });
 }
 
-async function setupHealthIndicator() {
+/**
+ * Writes the status text into the indicator, preserving the <b> emphasis the
+ * stylesheet expects. Assigning to label.textContent would delete the element
+ * and drop the bold styling.
+ */
+function setEngineStatus(text) {
     const indicator = document.querySelector(".status-indicator");
+    if (!indicator) return;
+    const label = indicator.querySelector("span:last-child");
+    if (!label) return;
+    const strong = label.querySelector("b");
+    if (strong) {
+        strong.textContent = text;
+    } else {
+        label.textContent = text;
+    }
+}
+
+function setEngineDot(color, pulsing) {
+    const indicator = document.querySelector(".status-indicator");
+    if (!indicator) return;
+    const dot = indicator.querySelector(".dot");
+    if (!dot) return;
+    if (pulsing) {
+        dot.classList.add("pulse");
+    } else {
+        dot.classList.remove("pulse");
+    }
+    if (color) dot.style.background = color;
+}
+
+async function setupHealthIndicator() {
+    // Say so before asking. The probe can take a couple of seconds when a
+    // dependency is slow to answer, and claiming "ONLINE" in the meantime is a
+    // lie the operator would record.
+    setEngineStatus("CHECKING...");
+    setEngineDot(null, true);
     try {
         const response = await fetch(API_BASE + "/health");
         const health = await response.json();
 
-        if (indicator) {
-            const dot = indicator.querySelector(".dot");
-            const label = indicator.querySelector("span:last-child");
-            if (dot) {
-                dot.classList.remove("pulse");
-                dot.style.background = health.status === "ok"
-                    ? "var(--success)"
-                    : "var(--warning)";
-            }
-            if (label) {
-                const states = (health.components || [])
-                    .map((c) => c.name + ":" + c.status)
-                    .join("  ");
-                label.textContent = "ENGINE: " +
-                    String(health.status).toUpperCase() + "  |  " + states;
-            }
-        }
+        setEngineDot(
+            health.status === "ok" ? "var(--success)" : "var(--warning)",
+            false
+        );
+        const states = (health.components || [])
+            .map((c) => c.name + ":" + c.status)
+            .join("  ");
+        setEngineStatus(
+            String(health.status).toUpperCase() + (states ? "  |  " + states : "")
+        );
         renderHealthTable(health);
     } catch (error) {
-        if (indicator) {
-            const label = indicator.querySelector("span:last-child");
-            if (label) label.textContent = "ENGINE: UNREACHABLE";
-        }
+        setEngineDot("var(--danger)", false);
+        setEngineStatus("UNREACHABLE");
         const body = document.getElementById("health-table-body");
         if (body) {
             body.innerHTML = '<tr><td colspan="3" class="text-muted">' +
                 "Could not reach " + API_BASE + "/health</td></tr>";
         }
+    }
+}
+
+/* ------------------------------------------------------- api discovery */
+function escapeHtml(value) {
+    return String(value === null || value === undefined ? "" : value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+}
+
+function renderApiTable(payload) {
+    const body = document.getElementById("api-table-body");
+    if (!body) return;
+    const rows = (payload && payload.endpoints) || [];
+    body.innerHTML = "";
+    if (!rows.length) {
+        const tr = document.createElement("tr");
+        const td = document.createElement("td");
+        td.colSpan = 5;
+        td.className = "text-muted";
+        // An empty list is the normal case without PostgreSQL, and also before
+        // the first crawl, so it must not look like an error.
+        td.textContent =
+            "No endpoints discovered yet. Enable API Intelligence and run a crawl " +
+            "against a site that calls its own backend.";
+        tr.appendChild(td);
+        body.appendChild(tr);
+        return;
+    }
+    rows.forEach((row) => {
+        const tr = document.createElement("tr");
+        const cells = [
+            row.method || "-",
+            row.path || row.url || "-",
+            row.host || "-",
+            row.content_type || "-",
+            row.seen_count === undefined ? "-" : String(row.seen_count)
+        ];
+        cells.forEach((value, index) => {
+            const td = document.createElement("td");
+            if (index === 0) td.className = "font-jet";
+            // textContent, never innerHTML: these are sniffed remote values.
+            td.textContent = value;
+            tr.appendChild(td);
+        });
+        body.appendChild(tr);
+    });
+}
+
+async function loadDiscoveredApis() {
+    const body = document.getElementById("api-table-body");
+    if (body && !body.querySelector("tr")) {
+        body.innerHTML =
+            '<tr><td colspan="5" class="text-muted">Loading discovered endpoints...</td></tr>';
+    }
+    try {
+        const response = await fetch(`${API_BASE}/apis`);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        renderApiTable(await response.json());
+    } catch (error) {
+        if (body) {
+            body.innerHTML = "";
+            const tr = document.createElement("tr");
+            const td = document.createElement("td");
+            td.colSpan = 5;
+            td.className = "text-muted";
+            td.textContent =
+                "Could not load discovered endpoints (" + error.message +
+                "). The API registry lives in PostgreSQL.";
+            tr.appendChild(td);
+            body.appendChild(tr);
+        }
+    }
+}
+
+function wireApiDiscovery() {
+    const refresh = document.getElementById("refresh-apis-btn");
+    if (refresh) refresh.addEventListener("click", loadDiscoveredApis);
+
+    // Load the first time the tab is opened rather than on every page load, so
+    // the initial console render stays cheap.
+    const navItem = document.querySelector('.nav-item[data-tab="api-discovery"]');
+    if (navItem) {
+        navItem.addEventListener("click", () => {
+            loadDiscoveredApis();
+        }, { once: false });
     }
 }
 

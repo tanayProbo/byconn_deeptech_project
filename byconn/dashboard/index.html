@@ -35,12 +35,15 @@
                 <a href="#" class="nav-item" data-tab="api-keys">
                     <span class="nav-icon">🔑</span> API Keys
                 </a>
+                <a href="#" class="nav-item" data-tab="api-discovery">
+                    <span class="nav-icon">🛰️</span> API Discovery
+                </a>
             </nav>
 
             <div class="sidebar-footer">
                 <div class="status-indicator">
                     <span class="dot pulse"></span>
-                    <span>ENGINE: <b>ONLINE</b></span>
+                    <span>ENGINE: <b>CHECKING&hellip;</b></span>
                 </div>
             </div>
         </aside>
@@ -123,7 +126,7 @@
                         <div class="search-result-item" style="border-color: var(--success); border-width: 4px;">
                             <div class="res-header">
                                 <span class="res-title">Result: Stripe Pricing Plans</span>
-                                <button class="btn btn-sm btn-secondary">⭐ Save</button>
+                                <!-- unimplemented: <button class="btn btn-sm btn-secondary">⭐ Save</button> -->
                             </div>
                             <p class="res-snippet font-jet">
                                 1. Integrated Plan: 2.9% + 30¢ per successful card charge.<br><br>
@@ -140,8 +143,12 @@
                 <section class="tab-panel" id="panel-history">
                     <div class="panel-header">
                         <h3>Recent Agent Tasks</h3>
-                        <button class="btn btn-danger">Clear History</button>
+                        <!-- unimplemented: <button class="btn btn-danger">Clear History</button> -->
                     </div>
+                    <p class="text-muted">
+                        Illustrative rows. Job history is not persisted yet, so nothing
+                        below reflects a real run of this engine.
+                    </p>
                     <table class="data-table">
                         <thead>
                             <tr>
@@ -149,7 +156,7 @@
                                 <th>Mode</th>
                                 <th>Time</th>
                                 <th>Status</th>
-                                <th>Action</th>
+                                <!-- unimplemented: <th>Action</th> -->
                             </tr>
                         </thead>
                         <tbody>
@@ -158,21 +165,21 @@
                                 <td><span class="badge">Deep Research</span></td>
                                 <td>2 mins ago</td>
                                 <td><span class="badge badge-success">Completed</span></td>
-                                <td><button class="btn-sm btn-secondary">View</button></td>
+                                <td class="text-muted">-</td>
                             </tr>
                             <tr>
                                 <td><b>Summarize latest tech news on HackerNews</b></td>
                                 <td><span class="badge">Fast Scrape</span></td>
                                 <td>1 hour ago</td>
                                 <td><span class="badge badge-success">Completed</span></td>
-                                <td><button class="btn-sm btn-secondary">View</button></td>
+                                <td class="text-muted">-</td>
                             </tr>
                             <tr>
                                 <td><b>Find login button on example.com and click it</b></td>
                                 <td><span class="badge badge-accent">Visual Action</span></td>
                                 <td>3 hours ago</td>
                                 <td><span class="badge badge-warning">Blocked (Captcha)</span></td>
-                                <td><button class="btn-sm btn-secondary">View</button></td>
+                                <td class="text-muted">-</td>
                             </tr>
                         </tbody>
                     </table>
@@ -182,9 +189,12 @@
                 <section class="tab-panel" id="panel-saved">
                     <div class="panel-header">
                         <h3>Saved Data & JSON Exports</h3>
-                        <button class="btn btn-primary">Export All (CSV)</button>
+                        <!-- unimplemented: <button class="btn btn-primary">Export All (CSV)</button> -->
                     </div>
-                    
+                    <p class="text-muted">
+                        Illustrative rows. Nothing can be saved or exported yet.
+                    </p>
+
                     <div class="search-results-list">
                         <div class="search-result-item">
                             <div class="res-header">
@@ -193,8 +203,8 @@
                             </div>
                             <p class="res-snippet">A compiled list of 240 startups from the YC Summer 24 batch, including their domains, descriptions, and founder details.</p>
                             <div style="display: flex; gap: 12px;">
-                                <button class="btn btn-sm btn-secondary">View JSON</button>
-                                <button class="btn btn-sm btn-danger">Delete</button>
+                                <!-- unimplemented: <button class="btn btn-sm btn-secondary">View JSON</button> -->
+                                <!-- unimplemented: <button class="btn btn-sm btn-danger">Delete</button> -->
                             </div>
                         </div>
                     </div>
@@ -218,6 +228,35 @@
                         <tbody id="health-table-body">
                             <tr>
                                 <td colspan="3" class="text-muted">Loading engine status...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </section>
+
+                <!-- 5. API Discovery Tab: endpoints sniffed by the crawler -->
+                <section class="tab-panel" id="panel-api-discovery">
+                    <div class="panel-header">
+                        <h3>Discovered REST Endpoints</h3>
+                        <button class="btn btn-primary" id="refresh-apis-btn">Refresh</button>
+                    </div>
+                    <p class="text-muted">
+                        Populated by the crawler's API Intelligence pass, which records the
+                        XHR and fetch calls a page makes to its own backend. Records are
+                        stored in PostgreSQL.
+                    </p>
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Method</th>
+                                <th>Path</th>
+                                <th>Host</th>
+                                <th>Content Type</th>
+                                <th>Seen</th>
+                            </tr>
+                        </thead>
+                        <tbody id="api-table-body">
+                            <tr>
+                                <td colspan="5" class="text-muted">Loading discovered endpoints...</td>
                             </tr>
                         </tbody>
                     </table>
