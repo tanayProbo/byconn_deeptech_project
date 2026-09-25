@@ -207,9 +207,10 @@
     <!-- UI Interaction Scripts -->
     <script src="app.js"></script>
     <script>
-        // Simple mock function for the UI interaction
-        function startSearch() {
+        // Function to trigger real search against the FastAPI backend
+        async function startSearch() {
             const input = document.getElementById('main-search-input').value;
+            const mode = document.querySelector('.ws-select').value;
             if(!input) return;
 
             const terminal = document.getElementById('agent-terminal-card');
@@ -222,29 +223,65 @@
             resultArea.style.display = 'none';
             logStream.innerHTML = '';
 
-            const logs = [
-                `[SYSTEM] Initializing Agent with query: "${input}"`,
-                `[VISION] Loading target URL in headless browser...`,
-                `[CRAWLER] Bypassing anti-bot protections...`,
-                `[PIPELINE] Extracting DOM tree and passing to LLM...`,
-                `[API-INTEL] Structuring data into JSON format...`,
-                `[SYSTEM] Task complete.`
-            ];
+            const addLog = (msg) => {
+                logStream.innerHTML += `<div class="log-line font-jet">> ${msg}</div>`;
+                logStream.scrollTop = logStream.scrollHeight;
+            };
 
-            let i = 0;
-            const interval = setInterval(() => {
-                if (i < logs.length) {
-                    logStream.innerHTML += `<div class="log-line font-jet">> ${logs[i]}</div>`;
-                    logStream.scrollTop = logStream.scrollHeight;
-                    i++;
-                } else {
-                    clearInterval(interval);
-                    setTimeout(() => {
-                        resultArea.style.display = 'block';
-                        document.querySelector('.res-title').innerText = `Result: ${input}`;
-                    }, 500);
+            addLog(`[SYSTEM] Initializing Agent with query: "${input}"`);
+            addLog(`[API] Sending request to BYCONN-X Backend (http://localhost:8000)...`);
+            addLog(`[WAIT] Waiting for agent to crawl, extract, and process data. This may take 10-30 seconds...`);
+
+            const startTime = Date.now();
+
+            try {
+                // Call the real FastAPI backend
+                const response = await fetch('http://localhost:8000/api/search', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query: input, mode: mode.toLowerCase().replace(' ', '_') })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Server returned ${response.status}: ${response.statusText}`);
                 }
-            }, 600);
+
+                const data = await response.json();
+                
+                addLog(`[SUCCESS] Data received from backend.`);
+                
+                // Calculate time taken
+                const timeTaken = ((Date.now() - startTime) / 1000).toFixed(1);
+
+                // Update the UI with real data
+                resultArea.style.display = 'block';
+                document.querySelector('.res-title').innerText = data.title || `Result: ${input}`;
+                
+                // Format entities if they exist
+                let entitiesHtml = "";
+                if (data.entities && data.entities.length > 0) {
+                    entitiesHtml = `<br><br><strong>Extracted Entities:</strong><ul>`;
+                    data.entities.slice(0, 5).forEach(e => {
+                        entitiesHtml += `<li><span class="badge" style="background: #e2e8f0; color: #000;">${e.type}</span> ${e.name}</li>`;
+                    });
+                    entitiesHtml += `</ul>`;
+                }
+
+                document.querySelector('.res-snippet').innerHTML = `
+                    <strong>Summary:</strong> ${data.summary || "No summary generated."}<br><br>
+                    <strong>Topics:</strong> ${(data.topics || []).join(", ")}
+                    ${entitiesHtml}
+                    <br><br>
+                    - Extracted from: <a href="${data.url}" target="_blank">${data.url}</a>
+                `;
+                
+                document.querySelector('.res-meta').innerText = `Time taken: ${timeTaken}s | URL: ${data.url} | Mode: ${mode}`;
+
+            } catch (error) {
+                addLog(`[ERROR] Failed to fetch from backend: ${error.message}`);
+                addLog(`[INFO] Ensure your teammate's backend server is running on localhost:8000!`);
+                addLog(`[INFO] Command to run backend: python -m byconn.main`);
+            }
         }
 
         // Tab switching logic
