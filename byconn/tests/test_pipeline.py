@@ -495,12 +495,19 @@ class TestEmbedderProviderHonesty:
     """A local placeholder key must not masquerade as a hosted credential."""
 
     def test_ollama_key_does_not_enable_hosted_embeddings(self, monkeypatch):
+        """The local placeholder must never be read as a hosted credential.
+
+        Asserted as "not the hosted provider" rather than "no provider", so the
+        test holds whether or not the optional sentence-transformers extra is
+        installed in the environment running the suite.
+        """
         from byconn.pipeline.embedder import DocumentEmbedder
 
         monkeypatch.setenv("OPENAI_API_KEY", "ollama")
         embedder = DocumentEmbedder()
-        assert embedder.is_available is False, "hosted embeddings would 401 on every page"
-        assert embedder.provider == "none"
+        assert embedder.provider != "openai", (
+            "hosted embeddings would 401 on every page"
+        )
 
     def test_real_openai_key_still_enables_embeddings(self, monkeypatch):
         from byconn.pipeline.embedder import DocumentEmbedder
@@ -518,6 +525,62 @@ class TestEmbedderProviderHonesty:
         from byconn.pipeline.embedder import DocumentEmbedder
 
         assert DocumentEmbedder(embedding_client=object()).is_available is True
+
+
+class TestLocalEmbeddingModelLoading:
+    """Regression: the local encoder ran before the model was ever loaded.
+
+    ``generate_dense_embeddings`` called ``_encode_local_sync`` directly, which
+    reads the cached ``_local_model`` and raised "Local embedding model is not
+    loaded" on the first call, so every page silently produced zero vectors.
+    The branch is unreachable unless sentence-transformers is installed, which
+    is why it survived.
+    """
+
+    def _embedder(self):
+        from byconn.pipeline.embedder import DocumentEmbedder
+
+        embedder = DocumentEmbedder(provider="sentence-transformers")
+        embedder.model = "fake-mini"
+        embedder.dimensions = 4
+        return embedder
+
+    def test_first_call_loads_the_model_and_returns_vectors(self):
+        embedder = self._embedder()
+
+        class _FakeModel:
+            def encode(self, chunks, **_kwargs):
+                return [[0.1, 0.2, 0.3, 0.4] for _ in chunks]
+
+        embedder._load_local_model = _FakeModel
+        assert embedder._local_model is None
+
+        vectors = run_async(embedder.generate_dense_embeddings(["a", "b"]))
+        assert vectors == [[0.1, 0.2, 0.3, 0.4], [0.1, 0.2, 0.3, 0.4]]
+        assert embedder._local_model is not None, "the model must be cached after use"
+
+    def test_model_is_loaded_once_across_calls(self):
+        embedder = self._embedder()
+        loads = []
+
+        class _Model:
+            def encode(self, chunks, **_kwargs):
+                return [[0.1, 0.2, 0.3, 0.4] for _ in chunks]
+
+        def _load():
+            loads.append(1)
+            return _Model()
+
+        embedder._load_local_model = _load
+        run_async(embedder.generate_dense_embeddings(["a"]))
+        run_async(embedder.generate_dense_embeddings(["b"]))
+        assert len(loads) == 1, "the model must not be reloaded per call"
+
+    def test_encode_sync_still_requires_a_loaded_model(self):
+        """The guard is kept, so a direct call fails loudly rather than silently."""
+        embedder = self._embedder()
+        with pytest.raises(RuntimeError, match="not loaded"):
+            embedder._encode_local_sync(["a"])
 
 
 class TestOpenSourceEndpoints:

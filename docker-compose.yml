@@ -1,0 +1,61 @@
+# BYCONN-X datastores.
+#
+#   docker compose up -d      start everything
+#   docker compose down       stop it
+#   docker compose down -v    stop it and delete the data
+#
+# These are the three stores the pipeline writes to: cleaned pages and entities
+# go to PostgreSQL, chunk vectors to Qdrant, and the entity/relation graph to
+# Neo4j. The service degrades gracefully without them, but /api/v1/health
+# reports each one as down and vector indexing is skipped, so start these
+# before recording a demo.
+#
+# Credentials match the defaults documented in .env.example. Change them there
+# too, or override them with an .env file next to this one.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: byconnx-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: byconnx
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d byconnx"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: byconnx-qdrant
+    ports:
+      - "6333:6333"   # REST, used by the adapter
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant-data:/qdrant/storage
+
+  neo4j:
+    image: neo4j:5-community
+    container_name: byconnx-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/password
+      # Keep the heap modest: this usually shares a laptop with the browser and
+      # the local model server, and Neo4j's default sizing can starve them.
+      NEO4J_server_memory_heap_max__size: 1G
+      NEO4J_server_memory_pagecache_size: 512M
+    ports:
+      - "7474:7474"   # HTTP browser
+      - "7687:7687"   # bolt, used by the adapter
+    volumes:
+      - neo4j-data:/data
+
+volumes:
+  postgres-data:
+  qdrant-data:
+  neo4j-data:

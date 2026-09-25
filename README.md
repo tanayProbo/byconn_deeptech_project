@@ -23,7 +23,7 @@ with real LLM-powered entity extraction and a knowledge-graph store.
 
 ## Quickstart & Demo
 
-Four commands take you from a clean clone to a live crawl and dashboard.
+A clean clone to a live crawl and dashboard, with every store green.
 
 ### 1. Install
 
@@ -40,7 +40,25 @@ playwright install chromium                        # downloads the browser binar
 used below. If you only run `pip install -r requirements.txt` you get the
 libraries but neither entry point.
 
-### 2. Configure `.env`
+### 2. Start the datastores
+
+```bash
+docker compose up -d
+```
+
+That starts PostgreSQL, Qdrant and Neo4j with the schema and collection already
+created. The service **starts without them** and degrades gracefully, but then
+`/api/v1/health` reports each store as `down`, vector indexing is skipped, and a
+crawl stores nothing — so do this before recording a demo. Check it with:
+
+```bash
+curl -s localhost:8000/api/v1/health | python -m json.tool
+# "status": "ok"  <- every component up
+```
+
+Shut down with `docker compose down` (add `-v` to delete the data).
+
+### 3. Configure `.env`
 
 Every value is optional — the service starts with none of them and reports
 `degraded` health. Copy the template and add whichever keys you have:
@@ -94,7 +112,7 @@ pip install -e ".[local-embeddings]"   # local model, no API key needed
 
 Full reference: [Configuration](#configuration).
 
-### 3. Start the backend
+### 4. Start the backend
 
 ```bash
 byconn-server                       # honours HOST/PORT (default 0.0.0.0:8000)
@@ -104,7 +122,7 @@ uvicorn server:app --reload
 
 Open <http://localhost:8000/docs> for the interactive API reference.
 
-### 4. Run a crawl
+### 5. Run a crawl
 
 Either through the API:
 
@@ -146,7 +164,7 @@ The CLI writes `byconn_results.json`:
 byconn crawl https://books.toscrape.com/ --depth 1 --concurrency 2
 ```
 
-### 5. View the dashboard
+### 6. View the dashboard
 
 <http://localhost:8000/dashboard>
 
@@ -156,22 +174,37 @@ Keys** tab. There is nothing extra to run.
 
 ### Recording a demo
 
-The two-terminal sequence for a screen recording:
+Three terminals, in this order:
 
 ```bash
-# Terminal 1 — the model server and configuration
-ollama serve
-cat .env                # OPENAI_API_KEY=ollama / MODEL_NAME / VISION_MODEL_NAME
+# Terminal 1 — the datastores
+docker compose up -d
+docker compose ps        # all three should say "running"
 ```
 
 ```bash
-# Terminal 2 — the service and dashboard
+# Terminal 2 — the local model server
+ollama serve             # with llama3.2 and llava pulled
+```
+
+```bash
+# Terminal 3 — the service and dashboard
 byconn-server
 ```
 
-Then browse to <http://localhost:8000/dashboard>, submit a URL, and record the
-crawl. Watch <http://localhost:8000/health> (or `/api/v1/health`) in a second tab
-to show which dependencies are live.
+Then browse to <http://localhost:8000/dashboard> and record:
+
+1. The header reads `ENGINE: OK | postgres:up qdrant:up neo4j:up`.
+2. Type a target — a bare domain is enough, e.g. `stripe.com/pricing` — pick a
+   mode, and press **Launch Agent**. **Fast Scrape** and **Deep Research** crawl;
+   **Visual Action** drives the browser agent.
+3. The terminal streams live counters, then renders the result.
+4. The **API Discovery** tab lists the endpoints the sniffer caught in the
+   target's own XHR traffic.
+
+The search box accepts a bare domain, a full URL, or an instruction with a URL
+in it (`extract pricing from stripe.com`); the prose is passed to the agent as
+the task.
 
 Counters on a finished job only ever report work that was actually persisted:
 `entities_extracted` counts what the model returned, while `pages_saved`,

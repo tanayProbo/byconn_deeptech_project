@@ -21,7 +21,8 @@ import os
 import re
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Sequence
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import asyncpg
 from neo4j import AsyncGraphDatabase
@@ -151,6 +152,59 @@ def _safe_identifier(raw: str, kind: str) -> str:
     if not _IDENTIFIER_RE.match(candidate):
         raise ValueError(f"Invalid Cypher {kind}: {raw!r}")
     return candidate
+
+
+def _neo4j_properties(
+    properties: Optional[Dict[str, Any]],
+    alias: str = "",
+) -> Tuple[str, Dict[str, Any]]:
+    """Encodes a mapping as Neo4j node/relationship properties.
+
+    Neo4j only accepts primitives, or arrays of primitives, as property values.
+    Passing the mapping itself (``r.properties = $props``) fails at runtime with
+    ``Property values can only be of primitive types or arrays thereof``, so the
+    keys are spread into individual properties instead.
+
+    ``alias`` is the Cypher variable the properties belong to (``p`` for a node,
+    ``r`` for a relationship); each clause is qualified with it.
+
+    Keys go through the same identifier allowlist as labels, and values are
+    coerced: containers that Neo4j cannot store are JSON-encoded to a string
+    rather than dropped, so nothing is silently lost. ``None`` is skipped
+    because assigning null removes a property in Cypher.
+
+    Returns ``(set_clause, params)`` where ``set_clause`` is a comma-separated
+    ``alias.key = $key`` list and ``params`` maps each placeholder to its value.
+    """
+    if not properties:
+        return "", {}
+    prefix = f"{alias}." if alias else ""
+    clauses: List[str] = []
+    params: Dict[str, Any] = {}
+    for raw_key, value in properties.items():
+        if value is None:
+            continue
+        try:
+            key = _safe_identifier(str(raw_key), "property key")
+        except ValueError:
+            logger.warning("Skipping Neo4j property with invalid key: %r", raw_key)
+            continue
+        params[key] = _neo4j_value(value)
+        clauses.append(f"{prefix}{key} = ${key}")
+    return ", ".join(clauses), params
+
+
+def _neo4j_value(value: Any) -> Any:
+    """Coerces a value into something Neo4j accepts as a property."""
+    if isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, (list, tuple)):
+        if all(isinstance(item, (str, bool, int, float)) for item in value):
+            return list(value)
+        return json.dumps(value, default=str)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return json.dumps(value, default=str)
 
 
 class BaseAdapter:
@@ -695,7 +749,7 @@ class QdrantAdapter(BaseAdapter):
             prefer_grpc=self.prefer_grpc,
             timeout=self.timeout,
         )
-        await self.ensure_collection()
+        await self._ensure_collection()
         logger.info("Qdrant collection '%s' ready (%d dims, cosine).", self.collection_name, self.vector_size)
 
     async def _close(self) -> None:
@@ -720,6 +774,16 @@ class QdrantAdapter(BaseAdapter):
         Returns the collection name. Safe to call repeatedly.
         """
         await self._ensure()
+        return await self._ensure_collection(recreate)
+
+    async def _ensure_collection(self, recreate: bool = False) -> str:
+        """Creates the collection, assuming the client already exists.
+
+        Split out from :meth:`ensure_collection` because ``_connect`` calls this
+        while holding the adapter's connect lock. Calling the public method from
+        there would re-enter ``connect``, and since ``asyncio.Lock`` is not
+        reentrant that deadlocked forever instead of raising.
+        """
         client = self._require_client()
 
         exists = await client.collection_exists(self.collection_name)
@@ -964,6 +1028,9 @@ class Neo4jAdapter(BaseAdapter):
         """MERGEs a :Page node for a crawled URL."""
         label = _safe_identifier("Page", "label")
         await self._ensure()
+        # Spread metadata into individual properties: Neo4j rejects a map value.
+        extra_clause, extra_params = _neo4j_properties(metadata, alias="p")
+        extra_clause = f", {extra_clause}" if extra_clause else ""
         async with self._require_driver().session(database=self.database) as session:
             await session.run(
                 f"""
@@ -971,13 +1038,12 @@ class Neo4jAdapter(BaseAdapter):
                 ON CREATE SET p.created_at = timestamp()
                 SET p.title = $title,
                     p.job_id = $job_id,
-                    p.crawled_at = timestamp(),
-                    p.metadata = $metadata
+                    p.crawled_at = timestamp(){extra_clause}
                 """,
                 url=url,
                 title=title or None,
                 job_id=job_id or None,
-                metadata=metadata or {},
+                **extra_params,
             )
         logger.info("MERGED Page node for %s", url)
 
@@ -1055,7 +1121,9 @@ class Neo4jAdapter(BaseAdapter):
         if not prepared:
             return 0
 
-        props = properties or {}
+        # Spread into individual relationship properties: Neo4j rejects a map.
+        extra_clause, extra_params = _neo4j_properties(properties, alias="r")
+        extra_clause = f",\n                          {extra_clause}" if extra_clause else ""
 
         async def _txn(tx) -> None:
             for item in prepared:
@@ -1067,12 +1135,11 @@ class Neo4jAdapter(BaseAdapter):
                     MERGE (o:{item['object_label']} {{key: $object}})
                     ON CREATE SET o.name = $object, o.created_at = timestamp()
                     MERGE (s)-[r:{item['predicate']}]->(o)
-                    SET r.updated_at = timestamp(),
-                        r.properties = $properties
+                    SET r.updated_at = timestamp(){extra_clause}
                     """,
                     subject=item["subject"],
                     object=item["object"],
-                    properties=props,
+                    **extra_params,
                 )
 
         async with self._require_driver().session(database=self.database) as session:

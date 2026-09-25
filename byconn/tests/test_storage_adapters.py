@@ -5,6 +5,8 @@ instrumented doubles, and the Qdrant adapter end-to-end against qdrant-client's
 embedded engine (no server required).
 """
 
+import asyncio
+
 import pytest
 
 from byconn.storage.adapters import (
@@ -185,6 +187,97 @@ class _Exploding(BaseAdapter):
         raise self.error
 
 
+class TestNeo4jPropertyEncoding:
+    """Regression: property maps were passed as values, which Neo4j rejects.
+
+    ``SET p.metadata = $metadata`` fails at runtime with "Property values can
+    only be of primitive types or arrays thereof. Encountered: Map{}". The
+    mapping has to be spread into individual, alias-qualified properties. This
+    path never ran in CI because the Neo4j double accepted anything.
+    """
+
+    def test_spreads_a_map_into_individual_properties(self):
+        from byconn.storage.adapters import _neo4j_properties
+
+        clause, params = _neo4j_properties(
+            {"source_url": "http://x.test/", "weight": 0.5}, alias="r"
+        )
+        assert clause == "r.source_url = $source_url, r.weight = $weight"
+        assert params == {"source_url": "http://x.test/", "weight": 0.5}
+
+    def test_qualifies_with_the_node_alias(self):
+        from byconn.storage.adapters import _neo4j_properties
+
+        clause, _ = _neo4j_properties({"depth": 0}, alias="p")
+        assert clause == "p.depth = $depth", "an unqualified clause is a Cypher syntax error"
+
+    def test_keeps_primitives_and_arrays_of_primitives(self):
+        from byconn.storage.adapters import _neo4j_properties
+
+        _clause, params = _neo4j_properties(
+            {"s": "x", "i": 1, "f": 1.5, "b": True, "arr": ["a", "b"]}, alias="p"
+        )
+        assert params == {"s": "x", "i": 1, "f": 1.5, "b": True, "arr": ["a", "b"]}
+
+    def test_json_encodes_values_neo4j_cannot_store(self):
+        """A nested map must be preserved as text, not dropped or passed raw."""
+        import json as json_module
+
+        from byconn.storage.adapters import _neo4j_properties
+
+        _clause, params = _neo4j_properties({"meta": {"x": 1}}, alias="p")
+        assert json_module.loads(params["meta"]) == {"x": 1}
+        assert isinstance(params["meta"], str), "a dict would be rejected by Neo4j"
+
+    def test_skips_none_and_invalid_keys(self):
+        from byconn.storage.adapters import _neo4j_properties
+
+        _clause, params = _neo4j_properties(
+            {"ok": 1, "none": None, "bad key!": 2, "'; DROP": 3}, alias="p"
+        )
+        assert params == {"ok": 1}
+
+    def test_empty_mapping_produces_no_clause(self):
+        from byconn.storage.adapters import _neo4j_properties
+
+        assert _neo4j_properties(None) == ("", {})
+        assert _neo4j_properties({}) == ("", {})
+
+    def test_no_query_passes_a_map_as_a_property_value(self):
+        """The generated Cypher must never bind a mapping to a property.
+
+        Asserted against the real queries the adapter emits, not the source
+        text, so a refactor cannot smuggle the old pattern back in.
+        """
+        from byconn.storage.adapters import Neo4jAdapter
+
+        sink = {"cypher": []}
+        adapter = Neo4jAdapter()
+        adapter._driver = _FakeDriver(sink)
+        adapter._connected = True
+
+        run_async(adapter.upsert_page("http://x.test/", title="T", job_id="j",
+                                      metadata={"depth": 0, "meta": {"a": 1}}))
+        run_async(adapter.write_triples(
+            [{"subject": "A", "predicate": "KNOWS", "object": "B"}],
+            properties={"source_url": "http://x.test/", "nested": {"b": 2}},
+        ))
+
+        assert sink["cypher"], "expected the adapter to emit queries"
+        for query, params in sink["cypher"]:
+            assert "p.metadata = " not in query
+            assert "r.properties = " not in query
+            # Every bound value must be something Neo4j can store.
+            for key, value in params.items():
+                assert not isinstance(value, dict), (
+                    f"parameter ${key} is a map; Neo4j rejects map property values"
+                )
+        # And the spread form is actually present.
+        queries = [q for q, _ in sink["cypher"]]
+        assert any("p.depth = $depth" in q for q in queries)
+        assert any("r.source_url = $source_url" in q for q in queries)
+
+
 class TestBaseAdapter:
     def test_starts_disconnected(self):
         assert _Exploding(RuntimeError()).is_connected is False
@@ -279,6 +372,60 @@ def qdrant(tmp_path):
 
 def _vector(seed: float = 0.5) -> list:
     return [seed] * DEFAULT_VECTOR_SIZE
+
+
+class TestQdrantConnect:
+    """Regression: connect() used to deadlock against a real Qdrant.
+
+    ``_connect`` ran while ``BaseAdapter.connect`` held the adapter's
+    ``asyncio.Lock``, and it called the public ``ensure_collection``, which
+    called ``_ensure`` -> ``connect`` again. ``asyncio.Lock`` is not reentrant,
+    so the second acquire waited for a lock the first call was still holding and
+    the coroutine hung forever. The other suites missed it because their
+    fixtures inject a client and set ``_connected``, skipping ``connect()``.
+
+    These tests go through the real ``connect()`` path, wrapped in a timeout so
+    a regression fails instead of hanging the run.
+    """
+
+    def _embedded(self, tmp_path, monkeypatch):
+        from qdrant_client import AsyncQdrantClient
+
+        import byconn.storage.adapters as adapters_module
+
+        client = AsyncQdrantClient(path=str(tmp_path / "qdrant-connect"))
+        monkeypatch.setattr(adapters_module, "AsyncQdrantClient", lambda **_: client)
+        adapter = adapters_module.QdrantAdapter(
+            url="http://unused", collection_name=DEFAULT_COLLECTION,
+            vector_size=DEFAULT_VECTOR_SIZE,
+        )
+        return adapter, client
+
+    def test_connect_does_not_deadlock(self, tmp_path, monkeypatch):
+        adapter, client = self._embedded(tmp_path, monkeypatch)
+        try:
+            run_async(asyncio.wait_for(adapter.connect(), timeout=20))
+            assert adapter.is_connected is True
+        finally:
+            run_async(client.close())
+
+    def test_connect_creates_the_collection(self, tmp_path, monkeypatch):
+        adapter, client = self._embedded(tmp_path, monkeypatch)
+        try:
+            run_async(asyncio.wait_for(adapter.connect(), timeout=20))
+            assert run_async(adapter._require_client().collection_exists(
+                DEFAULT_COLLECTION)) is True
+        finally:
+            run_async(client.close())
+
+    def test_second_connect_is_a_no_op(self, tmp_path, monkeypatch):
+        adapter, client = self._embedded(tmp_path, monkeypatch)
+        try:
+            run_async(asyncio.wait_for(adapter.connect(), timeout=20))
+            run_async(asyncio.wait_for(adapter.connect(), timeout=20))
+            assert adapter.is_connected is True
+        finally:
+            run_async(client.close())
 
 
 class TestQdrantEmbedded:

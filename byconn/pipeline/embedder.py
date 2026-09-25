@@ -202,6 +202,8 @@ class DocumentEmbedder:
         )
         try:
             if self.provider == "sentence-transformers":
+                # Load on first use; _encode_local_sync reads the cached model.
+                await self._get_local_model()
                 vectors = await asyncio.to_thread(self._encode_local_sync, chunks)
             else:
                 vectors = await self._encode_openai(chunks)
