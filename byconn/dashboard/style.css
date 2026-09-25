@@ -1,25 +1,25 @@
-/* 🕹️ Retro Arcade / 8-Bit Dark Mode Palette 🕹️ */
+/* 🌈 Light & Lively Cartoon Theme 🌈 */
 :root {
-    --bg-main: #1F1B2E; /* Lighter Purple/Grey Arcade Background */
-    --bg-card: #2D2743; /* Lighter Purple Card */
-    --bg-sidebar: #191625; /* Lighter Sidebar */
-    
-    --border-color: #00FFFF; /* Neon Cyan */
+    --bg-main: #FFF8F0;       /* Warm Cream */
+    --bg-card: #FFFFFF;       /* Pure White */
+    --bg-sidebar: #FFF0FB;    /* Soft Lavender-Pink */
+
+    --border-color: #1A1A2E;  /* Deep Navy (keeps the bold look) */
     --border-width: 4px;
-    
-    /* Neon Colors */
-    --primary: #FF8AD8; /* Soft Pastel Pink */
-    --primary-light: #FFB3E6;
-    --accent: #00FFFF; /* Cyan */
-    --success: #39FF14; /* Neon Green */
-    --warning: #FFEA00; /* Yellow */
-    --danger: #FF0000; /* Red */
-    
-    --text-main: #FFFFFF;
-    --text-muted: #AAAAAA;
-    
-    --shadow-solid: 6px 6px 0px 0px var(--primary);
-    --shadow-solid-hover: 3px 3px 0px 0px var(--primary);
+
+    /* Vibrant Lively Palette */
+    --primary:       #7C3AED; /* Vivid Purple */
+    --primary-light: #A78BFA;
+    --accent:        #F472B6; /* Hot Pink */
+    --success:       #10B981; /* Emerald */
+    --warning:       #F59E0B; /* Amber */
+    --danger:        #EF4444; /* Red */
+
+    --text-main:  #1A1A2E;    /* Near-Black for readability */
+    --text-muted: #6B7280;
+
+    --shadow-solid:       6px 6px 0px 0px var(--border-color);
+    --shadow-solid-hover: 3px 3px 0px 0px var(--border-color);
 }
 
 /* Base Body Resets */
@@ -34,17 +34,19 @@
 body {
     background-color: var(--bg-main);
     color: var(--text-main);
-    /* 8-bit pixel font for that retro feel */
     font-family: 'Press Start 2P', 'JetBrains Mono', monospace;
     overflow-x: hidden;
     height: 100vh;
-    /* CRT Scanline Grid */
-    background-image: 
-        linear-gradient(rgba(0, 255, 255, 0.05) 2px, transparent 2px),
-        linear-gradient(90deg, rgba(0, 255, 255, 0.05) 2px, transparent 2px);
-    background-size: 30px 30px;
-    animation: pan-scanlines 30s linear infinite;
-    text-shadow: 2px 2px 0px #000;
+    /* Lively colorful confetti-dot background */
+    background-image:
+        radial-gradient(circle, #F472B6 2px, transparent 2px),
+        radial-gradient(circle, #7C3AED 2px, transparent 2px),
+        radial-gradient(circle, #10B981 2px, transparent 2px),
+        radial-gradient(circle, #F59E0B 2px, transparent 2px);
+    background-size: 60px 60px, 60px 60px, 60px 60px, 60px 60px;
+    background-position: 0 0, 30px 30px, 15px 45px, 45px 15px;
+    animation: pan-scanlines 40s linear infinite;
+    text-shadow: none;
 }
 
 /* Use JetBrains Mono for dense text to maintain readability */
@@ -77,10 +79,10 @@ body {
     align-items: center;
     gap: 12px;
     margin-bottom: 40px;
-    background: #000;
-    padding: 12px;
-    border: var(--border-width) solid var(--accent);
-    box-shadow: 4px 4px 0px 0px var(--accent);
+    background: var(--primary);
+    padding: 14px;
+    border: var(--border-width) solid var(--border-color);
+    box-shadow: 4px 4px 0px 0px var(--border-color);
 }
 
 .logo-icon {
@@ -89,13 +91,13 @@ body {
 
 .logo-text h1 {
     font-size: 14px;
-    color: var(--accent);
+    color: #FFFFFF;
     line-height: 1.5;
 }
 
 .logo-tagline {
     font-size: 8px;
-    color: var(--warning);
+    color: #E9D5FF;
 }
 
 /* Navigation list */
