@@ -303,6 +303,66 @@ class TestCrawlPipeline:
         assert "https://example.com/b" in urls
 
 
+class TestHonestCounters:
+    """A counter must never report work that was not actually persisted."""
+
+    def test_relations_written_is_zero_when_neo4j_rejects(self, client, monkeypatch):
+        """Regression: extraction is not persistence.
+
+        The pipeline used to add the number of *extracted* triples, so a crawl
+        whose every Neo4j write failed still reported relations_written > 0.
+        """
+        _pg, _qd, neo4j, _ex = (
+            client.app.state.postgres,
+            client.app.state.qdrant,
+            client.app.state.neo4j,
+            client.app.state.extractor,
+        )
+
+        async def _refuse(*_args, **_kwargs):
+            raise RuntimeError("neo4j unavailable")
+
+        monkeypatch.setattr(neo4j, "write_triples", _refuse)
+        job = poll_job(client, start_crawl(client, "https://example.com/", 0))
+
+        assert job["status"] == "succeeded", "a dead store must not fail the crawl"
+        assert job["entities_extracted"] == 2, "extraction still happened"
+        assert job["relations_written"] == 0, "nothing was persisted, so nothing to report"
+        assert any("neo4j relations failed" in err for err in job["errors"])
+
+    def test_relations_written_counts_only_accepted_triples(self, client, monkeypatch):
+        _pg, _qd, neo4j, _ex = (
+            client.app.state.postgres,
+            client.app.state.qdrant,
+            client.app.state.neo4j,
+            client.app.state.extractor,
+        )
+
+        async def _partial(_triples, **_kwargs):
+            return 0  # store accepted nothing
+
+        monkeypatch.setattr(neo4j, "write_triples", _partial)
+        job = poll_job(client, start_crawl(client, "https://example.com/", 0))
+        assert job["relations_written"] == 0
+
+
+class TestHealthAlias:
+    """Standard liveness probes expect /health, not only the versioned path."""
+
+    def test_both_paths_are_registered(self):
+        from server import app
+
+        paths = {route.path for route in app.routes}
+        assert "/api/v1/health" in paths
+        assert "/health" in paths
+
+    def test_alias_answers_like_the_versioned_path(self, client):
+        aliased = client.get("/health")
+        versioned = client.get("/api/v1/health")
+        assert aliased.status_code == versioned.status_code
+        assert aliased.json()["status"] == versioned.json()["status"]
+
+
 class TestCrawlResilience:
     def test_database_failure_does_not_abort_the_crawl(self, client):
         postgres, qdrant, _neo4j, _extractor = (

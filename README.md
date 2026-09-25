@@ -45,16 +45,47 @@ Every value is optional — the service starts with none of them and reports
 cp .env.example .env
 ```
 
+**Option A — free and offline (Ollama, no API key, nothing leaves your machine).**
+
 ```bash
-# .env — at least one LLM key enables entity/relation extraction.
-# The provider is auto-detected; OpenAI wins if both are present.
+ollama pull llama3.2     # text extraction
+ollama pull llava        # screenshots, for the visual agent
+ollama serve
+```
+
+```bash
+# .env
+OPENAI_API_KEY=ollama                     # implies http://localhost:11434/v1
+MODEL_NAME=llama3.2
+VISION_MODEL_NAME=llava
+```
+
+`OPENAI_API_KEY=ollama` is the switch that selects the local endpoint, so
+`OPENAI_API_BASE` can be omitted. Any OpenAI-compatible server (vLLM, LM Studio,
+llama.cpp, TGI) works the same way — set `OPENAI_API_BASE` to its `/v1` URL.
+
+**Option B — free hosted tier (Groq):**
+
+```bash
+# .env
+GROQ_API_KEY=gsk_...
+MODEL_NAME=llama-3.3-70b-versatile
+```
+
+**Option C — paid hosted (OpenAI or Gemini):**
+
+```bash
+# .env — the provider is auto-detected; OpenAI wins if both are present.
 OPENAI_API_KEY=sk-...
 GEMINI_API_KEY=...
+```
 
-# Vector search needs an embedding provider. With neither of the following
-# the crawl still stores pages but skips vector indexing.
+Vector search is separate and needs an embedding provider. With neither of the
+following the crawl still stores pages but skips vector indexing:
+
+```bash
 pip install -e ".[local-embeddings]"   # local model, no API key needed
-# OPENAI_API_KEY=sk-...                # or reuse your OpenAI key
+# OPENAI_API_KEY=sk-...                # or reuse a real hosted OpenAI key
 ```
 
 Full reference: [Configuration](#configuration).
@@ -119,6 +150,31 @@ The operator console is served by the same process — enter a target URL, watch
 the agent terminal stream progress, and inspect engine health on the **API
 Keys** tab. There is nothing extra to run.
 
+### Recording a demo
+
+The two-terminal sequence for a screen recording:
+
+```bash
+# Terminal 1 — the model server and configuration
+ollama serve
+cat .env                # OPENAI_API_KEY=ollama / MODEL_NAME / VISION_MODEL_NAME
+```
+
+```bash
+# Terminal 2 — the service and dashboard
+byconn-server
+```
+
+Then browse to <http://localhost:8000/dashboard>, submit a URL, and record the
+crawl. Watch <http://localhost:8000/health> (or `/api/v1/health`) in a second tab
+to show which dependencies are live.
+
+Counters on a finished job only ever report work that was actually persisted:
+`entities_extracted` counts what the model returned, while `pages_saved`,
+`chunks_indexed` and `relations_written` count what the stores accepted. If a
+datastore is down the crawl still succeeds and the shortfall appears in the
+job's `errors` array.
+
 ### What just happened
 
 For every page the pipeline crawls, cleans to Markdown, deduplicates against
@@ -131,8 +187,8 @@ the site's own XHR traffic and writes an OpenAPI spec to `byconn_output/`.
 | Symptom | Cause |
 | --- | --- |
 | `/api/v1/health` returns `503 degraded` | One or more of Postgres/Qdrant/Neo4j is unreachable. Each component is listed with its own status. |
-| `"embeddings": "disabled"` | No embedding provider. Run `pip install -e ".[local-embeddings]"` or set `OPENAI_API_KEY`. |
-| `"llm": "disabled"` | No `OPENAI_API_KEY` or `GEMINI_API_KEY`. Pages are still crawled and stored. |
+| `"embeddings": "disabled"` | No embedding provider. Run `pip install -e ".[local-embeddings]"` or set a real hosted `OPENAI_API_KEY`. |
+| `"llm": "disabled"` | No LLM endpoint configured. Set `OPENAI_API_KEY=ollama` for a local model, `GROQ_API_KEY` for the free tier, or `OPENAI_API_KEY` / `GEMINI_API_KEY`. Pages are still crawled and stored. |
 | `Executable doesn't exist ... chromium` | Run `playwright install chromium`. |
 
 ---
@@ -179,9 +235,15 @@ boots with no configuration at all.
 | `NEO4J_URI` | `bolt://localhost:7687` | Neo4j bolt URI |
 | `NEO4J_USER` / `NEO4J_PASSWORD` | `neo4j` / `password` | Neo4j credentials |
 | `NEO4J_DATABASE` | *(server default)* | Neo4j database name |
-| `LLM_PROVIDER` | `auto` | `openai`, `gemini` or `auto` |
-| `OPENAI_API_KEY` / `OPENAI_MODEL` | *(unset)* / `gpt-4o-mini` | OpenAI credentials and extraction model |
+| `LLM_PROVIDER` | `auto` | `openai`, `groq`, `gemini` or `auto` |
+| `OPENAI_API_KEY` | *(unset)* | OpenAI-compatible credentials. The literal `ollama` selects the local endpoint |
+| `OPENAI_API_BASE` | *(provider default)* | Base URL for any OpenAI-compatible server. Implied as `http://localhost:11434/v1` when `OPENAI_API_KEY=ollama` |
+| `GROQ_API_KEY` | *(unset)* | Groq free-tier key; base URL and model default automatically |
+| `MODEL_NAME` | `llama3.2` local / `gpt-4o-mini` hosted | Extraction model for any OpenAI-compatible endpoint |
+| `VISION_MODEL_NAME` | `llava` local / `gpt-4o-mini` hosted | Model used for screenshot-driven agent decisions |
+| `OPENAI_MODEL` / `GEMINI_MODEL` | *(unset)* | Legacy per-provider model overrides, used when `MODEL_NAME` is unset |
 | `GEMINI_API_KEY` / `GEMINI_MODEL` | *(unset)* / `gemini-3.8-flash` | Gemini credentials and model |
+| `HEALTH_PROBE_TIMEOUT` | `2.0` | Seconds before a dependency is reported down by the health endpoint |
 | `EMBEDDING_PROVIDER` | `auto` | `sentence-transformers`, `openai` or `auto` |
 | `EMBEDDING_MODEL` | provider default | Embedding model id |
 | `EMBEDDING_DIMENSIONS` | `384` | Must match your Qdrant collection |

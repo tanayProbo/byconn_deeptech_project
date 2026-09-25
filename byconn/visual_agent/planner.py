@@ -203,11 +203,16 @@ class LLMPlanner:
 
     @property
     def is_available(self) -> bool:
-        """Reports whether a provider key is configured."""
+        """Reports whether a provider key or endpoint is configured."""
         try:
             return bool(self.extractor.is_available)
         except Exception:
             return False
+
+    @property
+    def vision_model(self) -> str:
+        """The model used for screenshot-driven decisions."""
+        return self.extractor.vision_model
 
     async def plan(
         self,
@@ -239,7 +244,10 @@ class LLMPlanner:
             nodes=_format_nodes(nodes),
         )
 
-        raw_text = await extractor._call_with_retries(prompt, image)
+        # Vision requests go to VISION_MODEL_NAME when it differs from the text
+        # model, so a cheap local text model can be paired with a VLM.
+        target = extractor.vision_model if image else None
+        raw_text = await extractor._call_with_retries(prompt, image, target)
         if raw_text is None:
             return {"type": "stop"}
 

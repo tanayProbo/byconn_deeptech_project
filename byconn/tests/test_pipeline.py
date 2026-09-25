@@ -467,6 +467,250 @@ class TestLLMResponseParsing:
         assert result["summary"] == "123"
 
 
+class TestHermeticEnvironment:
+    """A developer's real .env must never influence the suite."""
+
+    def test_managed_variables_are_absent(self):
+        """conftest strips provider/endpoint vars before anything is imported."""
+        from byconn.tests.conftest import _MANAGED_ENV
+
+        import os
+
+        leaked = [key for key in _MANAGED_ENV if os.environ.get(key)]
+        assert not leaked, f"environment leaked into the suite: {leaked}"
+
+    def test_load_dotenv_is_disabled(self):
+        """A mid-run `import server` must not re-inject credentials."""
+        import dotenv
+
+        assert dotenv.load_dotenv() is False
+
+    def test_local_ollama_env_would_not_enable_extraction(self, monkeypatch):
+        """Even with a .env present, tests use doubles, not a live model."""
+        extractor = LLMExtractor()
+        assert extractor.is_available is False
+
+
+class TestEmbedderProviderHonesty:
+    """A local placeholder key must not masquerade as a hosted credential."""
+
+    def test_ollama_key_does_not_enable_hosted_embeddings(self, monkeypatch):
+        from byconn.pipeline.embedder import DocumentEmbedder
+
+        monkeypatch.setenv("OPENAI_API_KEY", "ollama")
+        embedder = DocumentEmbedder()
+        assert embedder.is_available is False, "hosted embeddings would 401 on every page"
+        assert embedder.provider == "none"
+
+    def test_real_openai_key_still_enables_embeddings(self, monkeypatch):
+        from byconn.pipeline.embedder import DocumentEmbedder
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-real-key")
+        assert DocumentEmbedder().is_available is True
+
+    def test_explicit_provider_overrides_detection(self, monkeypatch):
+        from byconn.pipeline.embedder import DocumentEmbedder
+
+        monkeypatch.setenv("OPENAI_API_KEY", "ollama")
+        assert DocumentEmbedder(provider="openai").is_available is True
+
+    def test_injected_client_enables_embeddings(self):
+        from byconn.pipeline.embedder import DocumentEmbedder
+
+        assert DocumentEmbedder(embedding_client=object()).is_available is True
+
+
+class TestOpenSourceEndpoints:
+    """Free / local model support: Ollama, Groq and any OpenAI-compatible URL."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch):
+        for key in ("OPENAI_API_KEY", "OPENAI_API_BASE", "OPENAI_BASE_URL",
+                    "GROQ_API_KEY", "MODEL_NAME", "VISION_MODEL_NAME",
+                    "OPENAI_MODEL", "GEMINI_KEY_PLACEHOLDER"):
+            monkeypatch.delenv(key, raising=False)
+
+    def test_ollama_key_implies_local_base_url(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "ollama")
+        extractor = LLMExtractor()
+        assert extractor.base_url == "http://localhost:11434/v1"
+
+    def test_ollama_defaults(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "ollama")
+        extractor = LLMExtractor()
+        assert extractor.model == "llama3.2"
+        assert extractor.vision_model == "llava"
+        assert extractor.is_available is True
+
+    def test_model_name_overrides(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "ollama")
+        monkeypatch.setenv("MODEL_NAME", "qwen2.5-coder:7b")
+        assert LLMExtractor().model == "qwen2.5-coder:7b"
+
+    def test_vision_model_name_overrides(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "ollama")
+        monkeypatch.setenv("VISION_MODEL_NAME", "moondream")
+        assert LLMExtractor().vision_model == "moondream"
+
+    def test_explicit_base_url_wins(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "ollama")
+        monkeypatch.setenv("OPENAI_API_BASE", "http://192.168.1.50:11434/v1")
+        extractor = LLMExtractor()
+        assert extractor.base_url == "http://192.168.1.50:11434/v1"
+        assert extractor.model == "llama3.2", "a LAN Ollama is still a local endpoint"
+
+    def test_base_url_constructor_argument(self):
+        assert LLMExtractor(base_url="http://x.test/v1/").base_url == "http://x.test/v1"
+
+    def test_base_url_alone_supplies_a_placeholder_key(self, monkeypatch):
+        """Local servers that ignore auth need no key to be usable."""
+        monkeypatch.setenv("OPENAI_API_BASE", "http://127.0.0.1:8080/v1")
+        extractor = LLMExtractor()
+        assert extractor.is_available is True
+        assert extractor.model == "llama3.2"
+
+    def test_hosted_openai_defaults_unchanged(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-real-key")
+        extractor = LLMExtractor()
+        assert extractor.base_url is None
+        assert extractor.model == "gpt-4o-mini"
+        assert extractor.supports_json_mode is True
+
+    def test_groq_free_tier(self, monkeypatch):
+        monkeypatch.setenv("GROQ_API_KEY", "gsk-free")
+        extractor = LLMExtractor()
+        assert extractor.provider == "groq"
+        assert extractor.base_url == "https://api.groq.com/openai/v1"
+        assert extractor.model == "llama-3.3-70b-versatile"
+        assert extractor.is_available is True
+
+    def test_openai_key_still_wins_over_groq(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-real")
+        monkeypatch.setenv("GROQ_API_KEY", "gsk-free")
+        assert LLMExtractor().provider == "openai"
+
+    def test_gemini_unaffected_by_compatible_endpoints(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEY", "gk")
+        extractor = LLMExtractor()
+        assert extractor.provider == "gemini"
+        assert extractor.model == "gemini-3.8-flash"
+        assert extractor.base_url is None
+
+    @pytest.mark.parametrize("url,local", [
+        ("http://localhost:11434/v1", True),
+        ("http://127.0.0.1:8080/v1", True),
+        ("localhost:1234/v1", True),
+        ("https://0.0.0.0:8000/v1", True),
+        ("http://[::1]:11434/v1", True),
+        ("http://host.docker.internal:11434/v1", True),
+        ("https://api.openai.com/v1", False),
+        ("https://api.groq.com/openai/v1", False),
+        ("http://192.168.1.50:11434/v1", False),
+    ])
+    def test_local_host_detection(self, url, local):
+        from byconn.pipeline.llm_extractor import LLMExtractor as E
+        assert E._is_local_endpoint(url, None) is local
+
+    @pytest.mark.parametrize("key,local", [
+        ("ollama", True), ("local", True), ("none", True), ("no-key", True),
+        ("sk-real-key", False),
+    ])
+    def test_local_key_marker_detection(self, key, local):
+        from byconn.pipeline.llm_extractor import LLMExtractor as E
+        assert E._is_local_endpoint(None, key) is local
+
+    def test_local_endpoints_skip_json_mode(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "ollama")
+        assert LLMExtractor().supports_json_mode is False
+
+    def test_json_mode_refusal_falls_back_to_a_plain_prompt(self, monkeypatch):
+        """llava and friends reject response_format; the call must still succeed."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-real")   # hosted => json mode attempted
+        # Pretend the endpoint advertises JSON mode, then refuse it anyway.
+        monkeypatch.setattr(LLMExtractor, "supports_json_mode",
+                            property(lambda self: True))
+        extractor = LLMExtractor()
+        seen = []
+
+        class _Refuses(Exception):
+            status_code = 400
+
+        class _Completions:
+            async def create(self, **kwargs):
+                seen.append(kwargs)
+                if "response_format" in kwargs:
+                    raise _Refuses("response_format json_object is not supported")
+                return type("R", (), {"choices": [
+                    type("C", (), {"message": type("M", (), {"content": '{"type":"stop"}'})()})]})()
+
+        extractor._client = type("C", (), {"chat": type("H", (), {"completions": _Completions()})()})()
+        raw = run_async(extractor._call_openai("go"))
+        assert raw == '{"type":"stop"}'
+        assert len(seen) == 2, "one attempt with JSON mode, one without"
+        assert "response_format" in seen[0]
+        assert "response_format" not in seen[1]
+
+    def test_unrelated_400_is_not_swallowed(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-real")
+        monkeypatch.setattr(LLMExtractor, "supports_json_mode",
+                            property(lambda self: True))
+        extractor = LLMExtractor()
+
+        class _Completions:
+            async def create(self, **kwargs):
+                raise ValueError("something else went wrong")
+
+        extractor._client = type("C", (), {"chat": type("H", (), {"completions": _Completions()})()})()
+        with pytest.raises(ValueError):
+            run_async(extractor._call_openai("go"))
+
+
+class TestLenientJsonParsing:
+    """Open-source models return JSON in many shapes; all must be tolerated."""
+
+    def _entities(self, raw):
+        return LLMExtractor().parse_response(raw)["entities"]
+
+    def test_clean_json(self):
+        assert len(self._entities('{"entities":[{"name":"A","type":"PERSON"}]}')) == 1
+
+    def test_markdown_fence(self):
+        assert len(self._entities('```json\n{"entities":[{"name":"A"}]}\n```')) == 1
+
+    def test_fence_without_language(self):
+        assert len(self._entities('```\n{"entities":[{"name":"A"}]}\n```')) == 1
+
+    def test_surrounding_prose(self):
+        raw = 'Sure! {"entities":[{"name":"A"}]} Hope that helps.'
+        assert len(self._entities(raw)) == 1
+
+    def test_python_single_quotes(self):
+        raw = "{'entities': [{'name': 'A', 'type': 'PERSON'}]}"
+        assert len(self._entities(raw)) == 1
+
+    def test_trailing_commas(self):
+        raw = '{"entities": [{"name": "A"},], "triples": [],}'
+        assert len(self._entities(raw)) == 1
+
+    def test_unquoted_keys(self):
+        raw = '{entities: [{name: "A", type: "PERSON"}], triples: []}'
+        assert len(self._entities(raw)) == 1
+
+    def test_braces_inside_a_string(self):
+        """Regression: a naive find/rfind truncated the object mid-string."""
+        raw = '{"note": "use {braces} here", "entities": [{"name": "A"}]}'
+        assert len(self._entities(raw)) == 1
+
+    def test_first_object_wins(self):
+        raw = 'chatter {"entities":[{"name":"A"}]} more chatter'
+        assert len(self._entities(raw)) == 1
+
+    @pytest.mark.parametrize("raw", ["", "   ", "I cannot help with that.", "hello",
+                                     '{"entities": [{"name": "A"'])
+    def test_unparseable_returns_empty(self, raw):
+        assert LLMExtractor().parse_response(raw) == empty_result()
+
+
 class TestLLMTokenBudget:
     def test_counts_tokens(self):
         assert LLMExtractor().count_tokens("<p>hello world</p>") > 0
@@ -505,7 +749,7 @@ class TestLLMCallPath:
         extractor = LLMExtractor(provider="openai", max_retries=0)
         captured = {}
 
-        async def fake_call(prompt, image=None):
+        async def fake_call(prompt, image=None, model=None):
             captured["prompt"] = prompt
             return '{"entities":[{"name":"Acme","type":"ORGANIZATION"}],"triples":[]}'
 
@@ -521,7 +765,7 @@ class TestLLMCallPath:
         extractor = LLMExtractor(provider="openai", max_retries=3)
         attempts = {"n": 0}
 
-        async def flaky(prompt, image=None):
+        async def flaky(prompt, image=None, model=None):
             attempts["n"] += 1
             if attempts["n"] < 3:
                 raise self._RateLimit("slow down")
@@ -537,7 +781,7 @@ class TestLLMCallPath:
         extractor = LLMExtractor(provider="openai", max_retries=5)
         attempts = {"n": 0}
 
-        async def not_found(prompt, image=None):
+        async def not_found(prompt, image=None, model=None):
             attempts["n"] += 1
             raise self._NotFound("model not found")
 
@@ -551,7 +795,7 @@ class TestLLMCallPath:
         monkeypatch.setattr(asyncio, "sleep", lambda *_a, **_k: real_sleep(0))
         extractor = LLMExtractor(provider="openai", max_retries=1)
 
-        async def always_fail(prompt, image=None):
+        async def always_fail(prompt, image=None, model=None):
             raise RuntimeError("boom")
 
         extractor._call_openai = always_fail

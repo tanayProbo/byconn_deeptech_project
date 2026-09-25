@@ -502,7 +502,7 @@ class TestLLMPlanner:
         planner = LLMPlanner()
         monkeypatch.setattr(
             planner.extractor, "_call_with_retries",
-            lambda prompt, image=None: _async_return('{"type":"click","id":1}'),
+            lambda prompt, image=None, model=None: _async_return('{"type":"click","id":1}'),
         )
         action = run_async(planner.plan("goal", NODES, "https://x.test"))
         assert action["type"] == "click" and action["element_id"] == 1
@@ -512,7 +512,7 @@ class TestLLMPlanner:
         planner = LLMPlanner()
         monkeypatch.setattr(
             planner.extractor, "_call_with_retries",
-            lambda prompt, image=None: _async_return(None),
+            lambda prompt, image=None, model=None: _async_return(None),
         )
         assert run_async(planner.plan("goal", NODES, ""))["type"] == "stop"
 
@@ -534,7 +534,7 @@ class TestVisionFlow:
         planner = LLMPlanner()
         captured = {}
 
-        async def _capture(prompt, image=None):
+        async def _capture(prompt, image=None, model=None):
             captured["prompt"] = prompt
             captured["image"] = image
             return '{"type":"click","id":1}'
@@ -549,7 +549,7 @@ class TestVisionFlow:
         planner = LLMPlanner()
         captured = {}
 
-        async def _capture(prompt, image=None):
+        async def _capture(prompt, image=None, model=None):
             captured["prompt"] = prompt
             captured["image"] = image
             return '{"type":"stop"}'
@@ -564,7 +564,7 @@ class TestVisionFlow:
         planner = LLMPlanner()
         captured = {}
 
-        async def _capture(prompt, image=None):
+        async def _capture(prompt, image=None, model=None):
             captured["image"] = image
             return '{"type":"stop"}'
 
@@ -614,6 +614,41 @@ class TestVisionFlow:
 
         agent = VisualBrowserAgent(_StubPage(), planner=_Legacy(), step_delay=0)
         assert run_async(agent.execute_task("goal", max_steps=3)) is True
+
+    def test_vision_calls_use_the_vision_model(self, monkeypatch):
+        """A screenshot must route to VISION_MODEL_NAME, not the text model."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-real")
+        monkeypatch.setenv("MODEL_NAME", "cheap-text-model")
+        monkeypatch.setenv("VISION_MODEL_NAME", "vision-model")
+        planner = LLMPlanner()
+        assert planner.vision_model == "vision-model"
+
+        seen = {}
+
+        async def _capture(prompt, image=None, model=None):
+            seen["image"] = image
+            seen["model"] = model
+            return '{"type":"stop"}'
+
+        monkeypatch.setattr(planner.extractor, "_call_with_retries", _capture)
+        run_async(planner.plan("goal", NODES, "https://x.test", b"jpeg"))
+        assert seen["model"] == "vision-model"
+        assert seen["image"] == b"jpeg"
+
+    def test_text_only_calls_send_no_model_override(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-real")
+        monkeypatch.setenv("MODEL_NAME", "cheap-text-model")
+        monkeypatch.setenv("VISION_MODEL_NAME", "vision-model")
+        planner = LLMPlanner()
+        seen = {}
+
+        async def _capture(prompt, image=None, model=None):
+            seen["model"] = model
+            return '{"type":"stop"}'
+
+        monkeypatch.setattr(planner.extractor, "_call_with_retries", _capture)
+        run_async(planner.plan("goal", NODES, "https://x.test"))
+        assert seen["model"] is None, "text calls should use the extractor's own model"
 
     def test_image_data_url_encoding(self):
         from byconn.pipeline.llm_extractor import LLMExtractor

@@ -118,6 +118,9 @@ CHUNK_SIZE = max(100, _env_int("CHUNK_SIZE", 500))
 MAX_JOBS_RETAINED = max(1, _env_int("MAX_JOBS_RETAINED", 200))
 STARTUP_CONNECT_TIMEOUT = max(0.5, _env_float("STARTUP_CONNECT_TIMEOUT", 10.0))
 PIPELINE_STEP_TIMEOUT = max(1.0, _env_float("PIPELINE_STEP_TIMEOUT", 30.0))
+# Health must answer quickly, so probes get a much shorter budget than
+# startup; adapters also back off after a failure.
+HEALTH_PROBE_TIMEOUT = max(0.5, _env_float("HEALTH_PROBE_TIMEOUT", 2.0))
 DEDUPLICATE_PAGES = _env_bool("CRAWL_DEDUPLICATE", True)
 API_INTELLIGENCE = _env_bool("API_INTELLIGENCE", True)
 
@@ -400,7 +403,6 @@ async def process_page(
     entities = knowledge.get("entities", [])
     triples = knowledge.get("triples", [])
     job.entities_extracted += len(entities)
-    job.relations_written += len(triples)
 
     # --- store entities in PostgreSQL ------------------------------------
     if entities:
@@ -415,13 +417,16 @@ async def process_page(
                            app.state.neo4j.upsert_page(url, title=title, job_id=job.job_id))
         await guarded_step(job, url, "neo4j entity links",
                            app.state.neo4j.link_page_entities(url, entities))
-        await guarded_step(
+        # Count only the triples Neo4j actually accepted. Counting the extracted
+        # triples would report a healthy result while every write had failed.
+        written = await guarded_step(
             job, url, "neo4j relations",
             app.state.neo4j.write_triples(
                 triples,
                 properties={"source_url": url, "job_id": job.job_id, "title": title},
             ),
         )
+        job.relations_written += written or 0
 
     # --- discover links for the next depth level --------------------------
     if request.depth < request.max_depth and job.pages_crawled < CRAWL_MAX_PAGES:
@@ -798,7 +803,7 @@ async def health(response: Response) -> HealthResponse:
     )
     results = await asyncio.gather(
         *(
-            asyncio.wait_for(adapter.ping(), timeout=STARTUP_CONNECT_TIMEOUT)
+            asyncio.wait_for(adapter.ping(), timeout=HEALTH_PROBE_TIMEOUT)
             for _, adapter in checks
         ),
         return_exceptions=True,
@@ -846,6 +851,18 @@ async def health(response: Response) -> HealthResponse:
         components=components,
         active_jobs=active,
     )
+
+
+# Orchestrators, container healthchecks and uptime monitors conventionally probe
+# ``/health`` rather than a versioned API path. Alias it so a standard probe
+# does not get a 404 and misreport the deployment as down.
+app.add_api_route(
+    "/health",
+    health,
+    methods=["GET"],
+    response_model=HealthResponse,
+    summary="Alias of /api/v1/health for standard liveness probes",
+)
 
 
 if DASHBOARD_DIR.is_dir():

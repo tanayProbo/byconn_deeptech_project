@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -161,9 +162,14 @@ class BaseAdapter:
     ever built. Adapters are also usable as async context managers.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, retry_backoff: float = 5.0) -> None:
         self._connected = False
         self._lock = asyncio.Lock()
+        # After a failed connect, skip straight to the error for this long so a
+        # health probe against a down backend returns immediately instead of
+        # waiting out the full connect timeout on every request.
+        self.retry_backoff = retry_backoff
+        self._last_failure_at = 0.0
 
     @property
     def is_connected(self) -> bool:
@@ -175,9 +181,23 @@ class BaseAdapter:
         if self._connected:
             return self
         async with self._lock:
-            if not self._connected:
+            if self._connected:
+                return self
+            if (
+                self._last_failure_at
+                and (time.monotonic() - self._last_failure_at) < self.retry_backoff
+            ):
+                raise ConnectionError(
+                    f"{type(self).__name__}: not retried within "
+                    f"{self.retry_backoff}s of the last failure"
+                )
+            try:
                 await self._connect()
-                self._connected = True
+            except Exception:
+                self._last_failure_at = time.monotonic()
+                raise
+            self._last_failure_at = 0.0
+            self._connected = True
         return self
 
     async def _ensure(self) -> "BaseAdapter":

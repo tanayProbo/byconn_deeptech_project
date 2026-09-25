@@ -50,6 +50,22 @@ def _env_int(key: str, default: int) -> int:
     return value if value > 0 else default
 
 
+# Values that flag a locally hosted model server rather than a hosted credential.
+LOCAL_KEY_MARKERS = {"ollama", "local", "none", "no-key", "nokey"}
+
+
+def _hosted_openai_key() -> Optional[str]:
+    """Returns OPENAI_API_KEY only when it is a real hosted credential.
+
+    ``OPENAI_API_KEY=ollama`` selects the local LLM backend; it cannot be used
+    against the hosted embeddings endpoint, so it is ignored here.
+    """
+    key = os.getenv("OPENAI_API_KEY")
+    if not key or key.strip().lower() in LOCAL_KEY_MARKERS:
+        return None
+    return key
+
+
 def _module_available(name: str) -> bool:
     """Reports whether a module is installed, without importing it."""
     try:
@@ -100,7 +116,14 @@ class DocumentEmbedder:
 
     # --- provider resolution ------------------------------------------------
     def _resolve_provider(self, provider: Optional[str]) -> str:
-        """Determines which embedding backend to use."""
+        """Determines which embedding backend to use.
+
+        A local placeholder key (``ollama``, ``local``...) is deliberately not
+        treated as a hosted OpenAI credential: this embedder targets the hosted
+        embeddings API, so silently "enabling" vectors that will 401 on every
+        document would be worse than reporting them as unavailable. Use
+        ``EMBEDDING_PROVIDER=openai`` with a real key to override.
+        """
         requested = (provider or os.getenv("EMBEDDING_PROVIDER") or "auto").strip().lower()
         if requested != "auto":
             return requested
@@ -108,7 +131,7 @@ class DocumentEmbedder:
             return "openai"
         if _module_available("sentence_transformers"):
             return "sentence-transformers"
-        if os.getenv("OPENAI_API_KEY"):
+        if _hosted_openai_key():
             return "openai"
         # Nothing usable is installed or configured.
         return "none"
