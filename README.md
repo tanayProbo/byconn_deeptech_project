@@ -29,9 +29,44 @@ pip install -r requirements.txt
 playwright install
 ```
 
-## Usage Example
+## Environment Setup
 
-Run a basic crawl:
+Copy the example environment file and add your API keys:
+```bash
+cp .env.example .env
+```
+Make sure to add your `OPENAI_API_KEY` to enable the AI Extraction pipeline and Visual Agent. Database URIs (PostgreSQL, Neo4j, etc.) can also be configured here if you are using the storage adapters.
+
+## Running the Engine
+
+BYCONN-X comes with a fully-featured **FastAPI backend** and a **Neobrutalist UI Dashboard**.
+
+### 1. Start the API Server
+Run the main module to spin up the backend on port 8000:
+```bash
+python -m byconn.main
+```
+The server will now accept requests at `http://localhost:8000`.
+
+### 2. Open the Dashboard
+Simply open the provided HTML file in your web browser:
+```bash
+# On Windows
+start byconn/dashboard/index.html
+
+# On Mac
+open byconn/dashboard/index.html
+```
+From the dashboard, you can type natural language queries, and the UI will communicate with the local API server to crawl, extract entities, and display the JSON insights live.
+
+## CLI & Python Usage
+
+You can also run crawls directly from the CLI:
+```bash
+python -m byconn.main crawl https://example.com --depth 2 --concurrency 5
+```
+
+Or programmatically in Python:
 
 ```python
 from byconn.core.crawler import ByconnCrawler
