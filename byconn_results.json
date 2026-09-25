@@ -1,0 +1,9 @@
+[
+  {
+    "url": "https://example.com/",
+    "title": "Example Domain",
+    "markdown": "# Example Domain\n\nThis domain is for use in documentation examples without needing permission. Avoid use in operations.\n\nLearn more\n [Learn more](https://iana.org/domains/example)",
+    "chunks": 1,
+    "embeddings_generated": true
+  }
+]

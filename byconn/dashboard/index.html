@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BYCONN-X DATA ENGINE — Universal AI-Powered Data Acquisition Infrastructure</title>
+    <!-- Modern Premium Typography -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="logo-area">
+                <span class="logo-icon">⚡</span>
+                <div class="logo-text">
+                    <h1>BYCONN-X</h1>
+                    <span class="logo-tagline">DATA ENGINE</span>
+                </div>
+            </div>
+            
+            <nav class="nav-links">
+                <a href="#" class="nav-item active" data-tab="overview">
+                    <span class="nav-icon">📊</span> Overview
+                </a>
+                <a href="#" class="nav-item" data-tab="crawlers">
+                    <span class="nav-icon">🕸️</span> Crawlers
+                </a>
+                <a href="#" class="nav-item" data-tab="apis">
+                    <span class="nav-icon">🔌</span> API Registry
+                </a>
+                <a href="#" class="nav-item" data-tab="workflows">
+                    <span class="nav-icon">🧩</span> Workflows
+                </a>
+                <a href="#" class="nav-item" data-tab="search">
+                    <span class="nav-icon">🔍</span> Search Portal
+                </a>
+                <a href="#" class="nav-item" data-tab="analytics">
+                    <span class="nav-icon">📈</span> Analytics
+                </a>
+                <a href="#" class="nav-item" data-tab="graph">
+                    <span class="nav-icon">🕸️</span> Knowledge Graph
+                </a>
+                <a href="#" class="nav-item" data-tab="monitoring">
+                    <span class="nav-icon">📺</span> Monitoring
+                </a>
+            </nav>
+
+            <div class="sidebar-footer">
+                <div class="status-indicator">
+                    <span class="dot pulse"></span>
+                    <span>System Status: <b>Optimal</b></span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <!-- Header -->
+            <header class="main-header">
+                <div class="header-left">
+                    <h2 id="page-title">Overview Dashboard</h2>
+                    <p id="page-subtitle" class="text-muted">Real-time status of planetary crawling operations.</p>
+                </div>
+                <div class="header-right">
+                    <div class="workspace-selector">
+                        <span class="ws-label">Workspace:</span>
+                        <select class="ws-select">
+                            <option>Global Dev Cluster</option>
+                            <option>Production E-Com</option>
+                            <option>Finance Scrape Hub</option>
+                        </select>
+                    </div>
+                    <button class="btn btn-primary" id="btn-run-crawl">▶ Run Action</button>
+                </div>
+            </header>
+
+            <!-- TAB PANELS -->
+            <div class="tab-panels">
+                
+                <!-- 1. Overview Tab -->
+                <section class="tab-panel active" id="panel-overview">
+                    <div class="stats-row">
+                        <div class="stat-card">
+                            <div class="stat-meta">
+                                <span class="stat-title">Crawl Throughput</span>
+                                <span class="stat-trend trend-up">↑ 12.4%</span>
+                            </div>
+                            <div class="stat-value">4,281<sub class="unit">pages/min</sub></div>
+                            <div class="stat-footer">Across 40 cluster nodes</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-meta">
+                                <span class="stat-title">API Routes Discovered</span>
+                                <span class="stat-trend trend-up">↑ 34 new</span>
+                            </div>
+                            <div class="stat-value">1,482<sub class="unit">endpoints</sub></div>
+                            <div class="stat-footer">Auto OpenAPI drafts compiled</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-meta">
+                                <span class="stat-title">GPU Inferences</span>
+                                <span class="stat-trend trend-stable">~ stable</span>
+                            </div>
+                            <div class="stat-value">82.4%<sub class="unit">load</sub></div>
+                            <div class="stat-footer">3 Ray node groups</div>
+                        </div>
+                    </div>
+
+                    <div class="dashboard-grid">
+                        <div class="grid-card wide">
+                            <div class="card-header">
+                                <h3>Live Data Stream</h3>
+                                <span class="badge badge-accent">Live Stream</span>
+                            </div>
+                            <div class="log-terminal" id="overview-log-stream">
+                                <div class="log-line"><span class="log-time">[19:10:04]</span> <span class="log-tag tag-crawler">CRAWLER</span> Navigated to <span class="log-url">https://github.com/apify/crawlee</span> (Status: 200)</div>
+                                <div class="log-line"><span class="log-time">[19:10:03]</span> <span class="log-tag tag-api">API-INTEL</span> Sniffed XHR endpoint: <span class="log-url">api.github.com/graphql</span> - schema mapped</div>
+                                <div class="log-line"><span class="log-time">[19:10:02]</span> <span class="log-tag tag-vision">VISION</span> Segmented DOM components: 12 buttons, 4 forms detected</div>
+                                <div class="log-line"><span class="log-time">[19:10:00]</span> <span class="log-tag tag-mobile">MOBILE</span> Android scrcpy client decoded frame: Pixel-7 (ADB target)</div>
+                                <div class="log-line"><span class="log-time">[19:09:58]</span> <span class="log-tag tag-pipeline">PIPELINE</span> Upserted 14 semantic nodes into Qdrant Vector db</div>
+                            </div>
+                        </div>
+                        
+                        <div class="grid-card">
+                            <div class="card-header">
+                                <h3>Data Source Health</h3>
+                            </div>
+                            <div class="health-list">
+                                <div class="health-item">
+                                    <div class="health-info">
+                                        <span class="health-name">Apify Crawlee Docs</span>
+                                        <span class="health-url">crawlee.dev</span>
+                                    </div>
+                                    <span class="health-badge badge-success">99.2%</span>
+                                </div>
+                                <div class="health-item">
+                                    <div class="health-info">
+                                        <span class="health-name">Github GraphQL Endpoints</span>
+                                        <span class="health-url">api.github.com</span>
+                                    </div>
+                                    <span class="health-badge badge-success">98.5%</span>
+                                </div>
+                                <div class="health-item">
+                                    <div class="health-info">
+                                        <span class="health-name">Reddit API Feed</span>
+                                        <span class="health-url">oauth.reddit.com</span>
+                                    </div>
+                                    <span class="health-badge badge-warning">84.1%</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- 2. Crawlers Tab -->
+                <section class="tab-panel" id="panel-crawlers">
+                    <div class="panel-header">
+                        <h3>Crawler Configurations</h3>
+                        <button class="btn btn-secondary" onclick="addNewCrawler()">+ Create Crawler</button>
+                    </div>
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Start URL</th>
+                                <th>Engine</th>
+                                <th>Depth</th>
+                                <th>Rate Limits</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="crawler-table-body">
+                            <tr>
+                                <td><b>Apify Github Crawl</b></td>
+                                <td><a href="#" class="link">github.com/apify/crawlee</a></td>
+                                <td><span class="badge">Playwright</span></td>
+                                <td>3 levels</td>
+                                <td>2 req/sec</td>
+                                <td><span class="badge badge-success">Active</span></td>
+                                <td><button class="btn-sm btn-danger">Pause</button></td>
+                            </tr>
+                            <tr>
+                                <td><b>Firecrawl Specs</b></td>
+                                <td><a href="#" class="link">firecrawl.dev/docs</a></td>
+                                <td><span class="badge">Cheerio</span></td>
+                                <td>5 levels</td>
+                                <td>10 req/sec</td>
+                                <td><span class="badge badge-success">Active</span></td>
+                                <td><button class="btn-sm btn-danger">Pause</button></td>
+                            </tr>
+                            <tr>
+                                <td><b>Android Store Mirror</b></td>
+                                <td><span class="text-muted">App Package: com.android.vending</span></td>
+                                <td><span class="badge">scrcpy ADB</span></td>
+                                <td>N/A</td>
+                                <td>No limit</td>
+                                <td><span class="badge badge-warning">Idle</span></td>
+                                <td><button class="btn-sm btn-primary">Start</button></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </section>
+
+                <!-- 3. API Registry Tab -->
+                <section class="tab-panel" id="panel-apis">
+                    <div class="panel-header">
+                        <h3>Discovered Endpoint Registries</h3>
+                        <button class="btn btn-primary" onclick="downloadOpenAPI()">Export OpenAPI Spec</button>
+                    </div>
+                    <div class="api-split">
+                        <div class="api-list-side">
+                            <div class="search-box">
+                                <input type="text" placeholder="Filter endpoints..." class="input-search">
+                            </div>
+                            <div class="api-endpoints-scroller">
+                                <div class="api-endpoint-item active">
+                                    <span class="api-method method-get">GET</span>
+                                    <span class="api-path">/api/v1/repos/apify/crawlee</span>
+                                </div>
+                                <div class="api-endpoint-item">
+                                    <span class="api-method method-post">POST</span>
+                                    <span class="api-path">/api/graphql</span>
+                                </div>
+                                <div class="api-endpoint-item">
+                                    <span class="api-method method-get">GET</span>
+                                    <span class="api-path">/users/active/metrics</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="api-details-side">
+                            <div class="detail-header">
+                                <h3>API Details: <span class="path-text">/api/v1/repos/apify/crawlee</span></h3>
+                                <span class="host-tag">Host: api.github.com</span>
+                            </div>
+                            <div class="tabs-sub">
+                                <button class="sub-tab active">JSON Schema</button>
+                                <button class="sub-tab">Example Body</button>
+                            </div>
+                            <div class="detail-body">
+                                <pre><code class="language-json">{
+  "type": "object",
+  "properties": {
+    "id": { "type": "integer" },
+    "name": { "type": "string" },
+    "full_name": { "type": "string" },
+    "owner": {
+      "type": "object",
+      "properties": {
+        "login": { "type": "string" }
+      }
+    }
+  }
+}</code></pre>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- 4. Workflows Tab -->
+                <section class="tab-panel" id="panel-workflows">
+                    <div class="panel-header">
+                        <h3>Workflow Builder</h3>
+                        <button class="btn btn-primary">Save Workflow</button>
+                    </div>
+                    <div class="canvas-container">
+                        <div class="canvas-sidebar">
+                            <h4>Workflow Blocks</h4>
+                            <div class="draggable-block">🕷️ Crawlee Node</div>
+                            <div class="draggable-block">📱 Mobile Capturer</div>
+                            <div class="draggable-block">💡 LLM Extract</div>
+                            <div class="draggable-block">📦 Qdrant Store</div>
+                            <div class="draggable-block">📊 ClickHouse Logs</div>
+                        </div>
+                        <div class="visual-canvas" id="workflow-canvas">
+                            <div class="canvas-hint">Drag blocks here to build raw scraping pipelines.</div>
+                            
+                            <!-- Sample workflow rendering -->
+                            <div class="node-wrapper" style="left: 100px; top: 150px;">
+                                <div class="workflow-node font-outfit">
+                                    <div class="node-title">Web Crawlee Node</div>
+                                    <div class="node-body">Start: https://crawlee.dev</div>
+                                </div>
+                            </div>
+
+                            <div class="node-connector" style="left: 280px; top: 185px; width: 80px;"></div>
+
+                            <div class="node-wrapper" style="left: 360px; top: 150px;">
+                                <div class="workflow-node node-ai font-outfit">
+                                    <div class="node-title">AI Extractor</div>
+                                    <div class="node-body">Extract pricing data</div>
+                                </div>
+                            </div>
+
+                            <div class="node-connector" style="left: 540px; top: 185px; width: 80px;"></div>
+
+                            <div class="node-wrapper" style="left: 620px; top: 150px;">
+                                <div class="workflow-node node-storage font-outfit">
+                                    <div class="node-title">Vector Storage</div>
+                                    <div class="node-body">Qdrant: catalog_idx</div>
+                                </div>
+                            </div>
+
+                        </div>
+                    </div>
+                </section>
+
+                <!-- 5. Search Tab -->
+                <section class="tab-panel" id="panel-search">
+                    <div class="search-header-panel">
+                        <h3>Hybrid Knowledge Search</h3>
+                        <div class="search-input-wrapper">
+                            <input type="text" placeholder="Query entities, relationships, or semantic topics..." id="hybrid-search-input">
+                            <button class="btn btn-primary" onclick="runSearchQuery()">Search</button>
+                        </div>
+                    </div>
+                    <div class="search-results-list" id="search-results-container">
+                        <div class="search-result-item">
+                            <div class="res-header">
+                                <span class="res-title">Crawlee Architecture Design</span>
+                                <span class="res-score">Match Score: 94.2% (Dense)</span>
+                            </div>
+                            <p class="res-snippet">...Crawlee scales node crawls dynamically using resource analysis of physical host limits. Includes autoscaled queues...</p>
+                            <div class="res-meta">Source: <a href="https://crawlee.dev" class="link">crawlee.dev</a> | Extracted: 19:10:04</div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- 6. Analytics Tab -->
+                <section class="tab-panel" id="panel-analytics">
+                    <div class="analytics-row">
+                        <div class="chart-card">
+                            <h4>Crawl Rate Trend</h4>
+                            <div class="mock-chart-placeholder">
+                                <svg viewBox="0 0 400 150" class="chart-svg">
+                                    <path d="M0,120 Q50,90 100,100 T200,50 T300,70 T400,20" fill="none" stroke="var(--primary)" stroke-width="3"/>
+                                </svg>
+                            </div>
+                        </div>
+                        <div class="chart-card">
+                            <h4>Extraction Model Token Costs</h4>
+                            <div class="mock-chart-placeholder">
+                                <svg viewBox="0 0 400 150" class="chart-svg">
+                                    <rect x="30" y="30" width="30" height="120" fill="var(--accent)" rx="3"/>
+                                    <rect x="90" y="60" width="30" height="90" fill="var(--accent)" rx="3"/>
+                                    <rect x="150" y="45" width="30" height="105" fill="var(--accent)" rx="3"/>
+                                    <rect x="210" y="80" width="30" height="70" fill="var(--accent)" rx="3"/>
+                                    <rect x="270" y="20" width="30" height="130" fill="var(--accent)" rx="3"/>
+                                </svg>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- 7. Knowledge Graph Tab -->
+                <section class="tab-panel" id="panel-graph">
+                    <div class="panel-header">
+                        <h3>Knowledge Graph Relationships</h3>
+                    </div>
+                    <div class="graph-canvas-container">
+                        <svg class="graph-svg-canvas" width="100%" height="450">
+                            <!-- Nodes -->
+                            <circle cx="200" cy="200" r="40" fill="var(--primary)" />
+                            <text x="200" y="205" text-anchor="middle" fill="#fff" font-weight="bold">BYCONN-X</text>
+
+                            <circle cx="450" cy="120" r="35" fill="var(--accent)" />
+                            <text x="450" y="125" text-anchor="middle" fill="#fff">Crawlee</text>
+
+                            <circle cx="450" cy="280" r="35" fill="var(--accent)" />
+                            <text x="450" y="285" text-anchor="middle" fill="#fff">Scrcpy</text>
+
+                            <!-- Lines -->
+                            <line x1="240" y1="200" x2="415" y2="125" stroke="var(--border)" stroke-width="2" />
+                            <line x1="240" y1="200" x2="415" y2="280" stroke="var(--border)" stroke-width="2" />
+                        </svg>
+                    </div>
+                </section>
+
+                <!-- 8. Monitoring Tab -->
+                <section class="tab-panel" id="panel-monitoring">
+                    <div class="stats-row">
+                        <div class="gauge-card">
+                            <h4>Node CPU Load</h4>
+                            <div class="gauge-value">34.2%</div>
+                        </div>
+                        <div class="gauge-card">
+                            <h4>Cluster Memory</h4>
+                            <div class="gauge-value font-jet">48.1 GB / 128 GB</div>
+                        </div>
+                        <div class="gauge-card">
+                            <h4>Active Queue Length</h4>
+                            <div class="gauge-value">12,480 pages</div>
+                        </div>
+                    </div>
+                </section>
+
+            </div>
+        </main>
+    </div>
+
+    <!-- UI Interaction Scripts -->
+    <script src="app.js"></script>
+</body>
+</html>

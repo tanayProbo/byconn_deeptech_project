@@ -1,0 +1,62 @@
+# Global configurations shared across all sub-charts
+global:
+  environment: production
+  namespace: byconn-x
+  imageRegistry: "docker.io/byconnx"
+
+# Gateway / Load Balancer
+gateway:
+  replicaCount: 2
+  image:
+    repository: gateway
+    tag: latest
+  service:
+    type: LoadBalancer
+    port: 80
+
+# Distributed Web Crawlers Nodes
+crawlerNode:
+  replicaCount: 10
+  image:
+    repository: crawler-node
+    tag: latest
+  resources:
+    limits:
+      cpu: "2"
+      memory: 4Gi
+    requests:
+      cpu: "500m"
+      memory: 1Gi
+  env:
+    REDIS_URL: "redis://redis-master.byconn-x.svc:6379/0"
+    KAFKA_BOOTSTRAP_SERVERS: "kafka.byconn-x.svc:9092"
+    CLICKHOUSE_HOST: "clickhouse.byconn-x.svc"
+
+# AI Extraction Workers (GPU resources requested)
+aiWorker:
+  replicaCount: 3
+  image:
+    repository: ai-worker
+    tag: latest
+  resources:
+    limits:
+      nvidia.com/gpu: 1
+      memory: 16Gi
+    requests:
+      nvidia.com/gpu: 1
+      memory: 8Gi
+  env:
+    RAY_CLUSTER_ADDRESS: "ray://ray-head.byconn-x.svc:6379"
+    QDRANT_HOST: "qdrant.byconn-x.svc"
+    NEO4J_URI: "bolt://neo4j.byconn-x.svc:7687"
+
+# External services configuration (if not deploying within cluster)
+databases:
+  postgres:
+    enabled: true
+    host: "byconn-postgres-instance"
+    database: "byconnx"
+  redis:
+    enabled: true
+  kafka:
+    enabled: true

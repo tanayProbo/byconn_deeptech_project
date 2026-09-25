@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "byconn-x"
+version = "0.1.0"
+authors = [
+  { name="Tanay Praveen Agrawal", email="tanayagrawal129@gmail.com" },
+]
+description = "Universal AI-Powered Data Acquisition Engine"
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "playwright>=1.41.0",
+    "beautifulsoup4>=4.12.0",
+    "psutil>=5.9.0",
+    "fastapi>=0.109.0",
+    "uvicorn>=0.27.0",
+    "sentence-transformers>=2.3.0"
+]
+
+[project.scripts]
+byconn = "byconn.main:cli"
+
+[tool.setuptools]
+packages = ["byconn", "byconn.core", "byconn.pipeline", "byconn.api_intelligence", "byconn.free_api_integration", "byconn.mobile", "byconn.storage", "byconn.visual_agent"]

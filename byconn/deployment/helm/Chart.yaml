@@ -1,0 +1,15 @@
+apiVersion: v2
+name: byconn-x-platform
+description: Helm chart deployment config for the BYCONN-X Data Engine Platform.
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+dependencies:
+  - name: redis
+    version: "17.0.0"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: databases.redis.enabled
+  - name: kafka
+    version: "22.0.0"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: databases.kafka.enabled
