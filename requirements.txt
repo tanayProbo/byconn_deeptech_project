@@ -1,6 +1,36 @@
+# Core
 playwright>=1.41.0
 beautifulsoup4>=4.12.0
 psutil>=5.9.0
 fastapi>=0.109.0
-uvicorn>=0.27.0
+uvicorn[standard]>=0.27.0
+python-dotenv>=1.0.0
+
+# AI / LLM
+openai>=1.30.0
 sentence-transformers>=2.3.0
+spacy>=3.7.0
+
+# Storage — Vector DB
+qdrant-client>=1.9.0
+
+# Storage — Graph DB
+neo4j>=5.20.0
+
+# Storage — Relational DB
+psycopg2-binary>=2.9.9
+asyncpg>=0.29.0
+
+# Storage — Analytical DB
+clickhouse-connect>=0.7.0
+
+# Distributed Compute
+ray>=2.20.0
+
+# HTTP & Parsing
+requests>=2.31.0
+httpx>=0.27.0
+lxml>=5.2.0
+
+# Serialization
+pydantic>=2.7.0

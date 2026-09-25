@@ -88,5 +88,49 @@ class VisualBrowserAgent:
             await self.page.mouse.move(x, y)
         else:
             logger.warning(f"Unrecognized action skipped: {action_type}")
-class BrowserUse:
-    pass
+class VisualAgent:
+    """
+    User-facing facade over VisualBrowserAgent.
+    Manages the Playwright browser lifecycle so callers don't have to.
+
+    Usage:
+        agent = VisualAgent(model="gpt-4o")
+        await agent.navigate("https://example.com")
+        await agent.act("Find the login button and click it")
+    """
+    def __init__(self, model: str = "gpt-4o", headless: bool = True):
+        self.model = model
+        self.headless = headless
+        self._playwright = None
+        self._browser = None
+        self._page = None
+        self._agent = None
+
+    async def _ensure_browser(self):
+        """Lazily initialises the Playwright browser on first use."""
+        if self._page is None:
+            from playwright.async_api import async_playwright
+            self._playwright = await async_playwright().start()
+            self._browser = await self._playwright.chromium.launch(headless=self.headless)
+            self._page = await self._browser.new_page()
+            # Stub LLM client — replace with openai.AsyncOpenAI() when key is set
+            self._agent = VisualBrowserAgent(page=self._page, llm_client=None)
+
+    async def navigate(self, url: str):
+        """Navigates the AI-controlled browser to the given URL."""
+        await self._ensure_browser()
+        await self._page.goto(url, wait_until="domcontentloaded")
+        logger.info(f"VisualAgent navigated to: {url}")
+
+    async def act(self, prompt: str, max_steps: int = 10) -> bool:
+        """Instructs the AI agent to achieve the described goal on the current page."""
+        await self._ensure_browser()
+        return await self._agent.execute_task(prompt=prompt, max_steps=max_steps)
+
+    async def close(self):
+        """Releases the browser resources."""
+        if self._browser:
+            await self._browser.close()
+        if self._playwright:
+            await self._playwright.stop()
+        logger.info("VisualAgent browser closed.")
