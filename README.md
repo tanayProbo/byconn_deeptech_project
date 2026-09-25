@@ -32,9 +32,13 @@ git clone https://github.com/tanayProbo/byconn_deeptech_project.git
 cd byconn_deeptech_project
 
 python -m venv venv && source venv/bin/activate   # Windows: .\venv\Scripts\activate
-pip install -r requirements.txt
+pip install -e .                                  # installs deps + byconn / byconn-server
 playwright install chromium                        # downloads the browser binary
 ```
+
+`pip install -e .` is what provides the `byconn` and `byconn-server` commands
+used below. If you only run `pip install -r requirements.txt` you get the
+libraries but neither entry point.
 
 ### 2. Configure `.env`
 
@@ -208,7 +212,7 @@ cd byconn_deeptech_project
 python -m venv venv
 source venv/bin/activate          # Windows: .\venv\Scripts\activate
 
-pip install -r requirements.txt
+pip install -e .
 playwright install chromium        # downloads the browser binary
 ```
 
