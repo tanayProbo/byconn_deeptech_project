@@ -928,3 +928,37 @@ body {
 .sub-tab.active {
     background: var(--success);
 }
+
+/* --- CARTOONISH OVERRIDES --- */
+.logo-area, .nav-item, .status-indicator, .main-header, 
+.workspace-selector, .ws-select, .btn, .stat-card, 
+.grid-card, .badge, .log-terminal, .data-table, 
+.api-list-side, .input-search, .api-endpoint-item, 
+.api-method, .api-details-side, .detail-header, 
+.panel-header, .canvas-sidebar, .draggable-block, 
+.visual-canvas, .workflow-node, .search-header-panel, 
+#main-search-input, .search-result-item, .res-score, .dot {
+    border-radius: 16px !important;
+}
+
+/* Make buttons and cards bouncy */
+.btn {
+    transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+}
+.btn:active {
+    transform: translate(4px, 4px) scale(0.95) !important;
+    box-shadow: 0px 0px 0px 0px #000 !important;
+}
+.nav-item {
+    transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+}
+.nav-item:hover {
+    transform: translateX(6px) scale(1.02) !important;
+}
+.search-result-item, .grid-card {
+    transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+}
+.search-result-item:hover, .grid-card:hover {
+    transform: translateY(-4px) !important;
+    box-shadow: 8px 8px 0px 0px #000 !important;
+}
