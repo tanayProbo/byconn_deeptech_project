@@ -159,6 +159,74 @@ class TestLinkDiscovery:
         assert server_module.extract_links is extract_links
         assert server_module.load_robots is load_robots
 
+    def test_load_robots_actually_fetches_over_http(self):
+        """Regression: robots.txt was fetched but never applied.
+
+        ``RobotFileParser.read`` is a blocking method, so the old
+        ``await parser.read()`` raised ``'NoneType' object can't be awaited``.
+        The error was swallowed and ``load_robots`` returned ``None`` on every
+        crawl, meaning robots.txt was silently ignored. The previous test only
+        exercised ``is_allowed`` with a hand-built parser, so it passed anyway.
+
+        This drives the real function against a throwaway HTTP server.
+        """
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        body = b"User-agent: *\nDisallow: /private\nDisallow: /admin\n"
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - name fixed by BaseHTTPRequestHandler
+                if self.path == "/robots.txt":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                else:
+                    self.send_error(404)
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        try:
+            parser = run_async(load_robots(base + "/"))
+            assert parser is not None, "robots.txt should have been fetched and parsed"
+            assert is_allowed(parser, base + "/public") is True
+            assert is_allowed(parser, base + "/private/x") is False
+            assert is_allowed(parser, base + "/admin") is False
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_load_robots_treats_404_as_no_restrictions(self):
+        """A missing robots.txt is normal and must not disable crawling."""
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                self.send_error(404)
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        try:
+            parser = run_async(load_robots(base + "/"))
+            assert parser is None or is_allowed(parser, base + "/anything") is True
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_load_robots_rejects_a_non_http_base(self):
+        assert run_async(load_robots("not-a-url")) is None
+
 
 # ==========================================================================
 # api_intelligence

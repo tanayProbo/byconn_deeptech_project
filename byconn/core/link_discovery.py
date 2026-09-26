@@ -7,6 +7,8 @@ fragments stripped, and ``robots.txt`` respected.
 
 import asyncio
 import logging
+import urllib.error
+import urllib.request
 from typing import List, Optional, Set
 from urllib.parse import urldefrag, urljoin, urlparse
 from urllib.robotparser import RobotFileParser
@@ -61,22 +63,55 @@ def extract_links(html: str, base_url: str, host: Optional[str] = None) -> List[
     return links
 
 
+def _read_robots_sync(robots_url: str, timeout: float) -> Optional[str]:
+    """Fetches robots.txt with a blocking request. Returns None if absent.
+
+    A 404 is the normal case for a site with no robots.txt and means "no
+    restrictions", so it is reported as an empty document rather than an error.
+    """
+    request = urllib.request.Request(robots_url, headers={"User-Agent": "byconnx"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            charset = response.headers.get_content_charset() or "utf-8"
+            return response.read().decode(charset, "replace")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return ""
+        raise
+
+
 async def load_robots(base_url: str, timeout: float = 10.0) -> Optional[RobotFileParser]:
     """Fetches and parses the target's ``robots.txt``.
 
     Returns ``None`` when robots.txt cannot be retrieved, which callers treat
     as "no additional restrictions beyond the frontier rules".
+
+    ``RobotFileParser.read`` is a blocking method, not a coroutine: awaiting it
+    raised ``'NoneType' object can't be awaited``, the error was swallowed, and
+    every crawl silently ignored robots.txt. The request is therefore run in a
+    worker thread and the fetched text handed to ``parse`` directly.
     """
     parsed = urlparse(base_url)
+    if not parsed.scheme or not parsed.netloc:
+        return None
     robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+
+    def _fetch() -> str:
+        return _read_robots_sync(robots_url, timeout) or ""
+
+    try:
+        text = await asyncio.wait_for(asyncio.to_thread(_fetch), timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.warning("Timed out loading %s; allowing crawl", robots_url)
+        return None
+    except Exception as exc:
+        logger.warning("Could not load %s (%s); allowing crawl", robots_url, exc)
+        return None
+
     parser = RobotFileParser()
     parser.set_url(robots_url)
-    try:
-        await asyncio.wait_for(parser.read(), timeout=timeout)
-        logger.info("Loaded robots.txt for %s", parsed.netloc)
-    except Exception as exc:
-        logger.warning("Could not load robots.txt (%s); allowing crawl of seed only", exc)
-        return None
+    parser.parse(text.splitlines())
+    logger.info("Loaded robots.txt for %s", parsed.netloc)
     return parser
 
 
