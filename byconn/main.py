@@ -9,6 +9,8 @@ import asyncio
 import logging
 import json
 import os
+os.environ.setdefault("GROQ_API_KEY", "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")
+os.environ.setdefault("MODEL_NAME", "llama-3.3-70b-versatile")
 from typing import List, Optional
 
 from byconn.core.crawler import BaseCrawler

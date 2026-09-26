@@ -19,6 +19,8 @@ import asyncio
 import json
 import logging
 import os
+os.environ.setdefault("GROQ_API_KEY", "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")
+os.environ.setdefault("MODEL_NAME", "llama-3.3-70b-versatile")
 import time
 import uuid
 from contextlib import asynccontextmanager
