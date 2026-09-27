@@ -38,14 +38,19 @@ class VisualBrowserAgent:
         self.step_delay = step_delay
         # Observation/action trace, useful for debugging and for API responses.
         self.history: List[Dict[str, Any]] = []
+        # Why the last run ended without reaching its goal, if it did.
+        self.failure_reason: Optional[str] = None
 
     async def execute_task(self, prompt: str, max_steps: int = 10) -> bool:
         """Executes browser interactions step-by-step to achieve the goal.
 
-        Returns ``True`` when the agent stopped early (goal reached or the
-        planner asked to stop) and ``False`` when it ran out of steps.
+        Returns ``True`` only when the planner deliberately chose ``stop``.
+        A planner error, an unusable model reply, an impossible action or an
+        exhausted step budget all return ``False`` with ``failure_reason``
+        set: a stop caused by a failure must never be reported as success.
         """
         logger.info(f"Visual Agent starting execution of goal: '{prompt}'")
+        self.failure_reason = None
 
         for step in range(max_steps):
             logger.info(f"--- Step {step + 1}/{max_steps} ---")
@@ -74,7 +79,7 @@ class VisualBrowserAgent:
                 action = await self.planner.plan(prompt, nodes, url=self.page.url)
             except Exception as exc:
                 logger.error("planner failed: %s", exc)
-                action = {"type": "stop"}
+                action = {"type": "stop", "error": f"planner failed: {exc}"}
             logger.info(f"Agent decided action: {action}")
 
             self.history.append({
@@ -85,6 +90,10 @@ class VisualBrowserAgent:
             })
 
             if action.get("type") == "stop":
+                if action.get("error"):
+                    self.failure_reason = str(action["error"])
+                    logger.error("Agent stopped on error: %s", self.failure_reason)
+                    return False
                 logger.info("Goal reached or agent requested completion.")
                 return True
 
@@ -101,16 +110,19 @@ class VisualBrowserAgent:
                     action.get("x"),
                     action.get("y"),
                 )
+                self.failure_reason = "no interactable elements to act on"
                 return False
 
             # 4. Perform the decided action.
             performed = await self._run_action(action)
             if not performed:
                 logger.info("Action could not be performed; ending the task.")
+                self.failure_reason = f"could not perform action {action!r}"
                 return False
             await asyncio.sleep(self.step_delay)  # wait for layout to re-render
 
         logger.error("Reached maximum steps without fully executing agent task.")
+        self.failure_reason = f"step budget of {max_steps} exhausted"
         return False
 
     async def _decide_action(

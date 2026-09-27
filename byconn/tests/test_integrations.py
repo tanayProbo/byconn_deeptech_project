@@ -582,7 +582,29 @@ class TestLLMPlanner:
             planner.extractor, "_call_with_retries",
             lambda prompt, image=None, model=None: _async_return(None),
         )
-        assert run_async(planner.plan("goal", NODES, ""))["type"] == "stop"
+        action = run_async(planner.plan("goal", NODES, ""))
+        assert action["type"] == "stop" and action["error"] == "LLM call failed"
+
+    def test_wrapped_action_is_unwrapped(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        planner = LLMPlanner()
+        monkeypatch.setattr(
+            planner.extractor, "_call_with_retries",
+            lambda prompt, image=None, model=None: _async_return(
+                '{"action": {"type": "click", "id": 1}}'
+            ),
+        )
+        action = run_async(planner.plan("goal", NODES, ""))
+        assert action["type"] == "click" and action["element_id"] == 1
+
+    def test_unusable_reply_is_an_error_stop(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        planner = LLMPlanner()
+        monkeypatch.setattr(
+            planner.extractor, "_call_with_retries",
+            lambda prompt, image=None, model=None: _async_return("I cannot help"),
+        )
+        assert run_async(planner.plan("goal", NODES, "")).get("error")
 
 
 async def _async_return(value):
@@ -902,7 +924,25 @@ class TestVisualBrowserAgent:
                 raise RuntimeError("planner down")
 
         agent = self._agent(_Broken())
-        assert run_async(agent.execute_task("g", max_steps=3)) is True  # degrades to stop
+        # A crashed planner must not be reported as a completed task.
+        assert run_async(agent.execute_task("g", max_steps=3)) is False
+        assert "planner down" in agent.failure_reason
+
+    def test_error_stop_is_a_failure_but_plain_stop_is_success(self):
+        class _ErrorStop:
+            async def plan(self, goal, nodes, url="", screenshot=None):
+                return {"type": "stop", "error": "LLM call failed"}
+
+        class _Done:
+            async def plan(self, goal, nodes, url="", screenshot=None):
+                return {"type": "stop", "reason": "goal reached"}
+
+        failed = self._agent(_ErrorStop())
+        assert run_async(failed.execute_task("g", max_steps=3)) is False
+        assert failed.failure_reason == "LLM call failed"
+        done = self._agent(_Done())
+        assert run_async(done.execute_task("g", max_steps=3)) is True
+        assert done.failure_reason is None
 
     def test_screenshot_failure_is_not_fatal(self):
         class _NoShot(_StubPage):

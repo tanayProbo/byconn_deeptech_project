@@ -73,13 +73,16 @@ def normalise_action(raw: Any, nodes: Sequence[Dict[str, Any]]) -> Dict[str, Any
     real node, and falls back to ``stop`` for anything unrecognised.
     """
     if not isinstance(raw, dict):
-        return {"type": "stop"}
+        return {"type": "stop", "error": "planner reply was not a JSON object"}
 
     action_type = str(raw.get("type") or "").strip().lower()
     if action_type not in VALID_ACTIONS:
-        return {"type": "stop"}
+        return {"type": "stop", "error": f"planner chose unknown action {action_type!r}"}
     if action_type == "stop":
-        return {"type": "stop"}
+        stop: Dict[str, Any] = {"type": "stop"}
+        if raw.get("reason"):
+            stop["reason"] = str(raw["reason"])[:200]
+        return stop
 
     action: Dict[str, Any] = {"type": action_type}
 
@@ -111,7 +114,7 @@ def normalise_action(raw: Any, nodes: Sequence[Dict[str, Any]]) -> Dict[str, Any
             action["x"] = int(raw["x"])
             action["y"] = int(raw["y"])
         except (KeyError, TypeError, ValueError):
-            return {"type": "stop"}
+            return {"type": "stop", "error": f"{action_type} has no resolvable target"}
 
     if action_type == "type":
         action["value"] = str(raw.get("value") or "")
@@ -178,7 +181,7 @@ class HeuristicPlanner:
                 "element_id": first.get("id"),
                 "reason": "heuristic: fallback to first interactable",
             }
-        return {"type": "stop"}
+        return {"type": "stop", "error": "no interactable elements"}
 
 
 class LLMPlanner:
@@ -228,7 +231,7 @@ class LLMPlanner:
         """
         extractor = self.extractor
         if not extractor.is_available:
-            return {"type": "stop"}
+            return {"type": "stop", "error": "no LLM configured"}
 
         image = screenshot if (screenshot and len(screenshot) <= MAX_IMAGE_BYTES) else None
         if screenshot and image is None:
@@ -249,15 +252,14 @@ class LLMPlanner:
         target = extractor.vision_model if image else None
         raw_text = await extractor._call_with_retries(prompt, image, target)
         if raw_text is None:
-            return {"type": "stop"}
+            return {"type": "stop", "error": "LLM call failed"}
 
         data = extractor._loads(raw_text)
         if isinstance(data, list) and data:
             data = data[0]
-        if not isinstance(data, dict):
-            # Some models wrap the action in {"action": {...}}.
-            inner = data.get("action") if isinstance(data, dict) else None
-            data = inner if isinstance(inner, dict) else data
+        # Some models wrap the action in {"action": {...}}.
+        if isinstance(data, dict) and "type" not in data and isinstance(data.get("action"), dict):
+            data = data["action"]
 
         action = normalise_action(data, nodes)
         logger.debug("LLM planner chose %s", action.get("type"))
