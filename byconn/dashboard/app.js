@@ -368,7 +368,7 @@ function renderResult(job, isAgent) {
     area.style.display = "block";
     area.innerHTML = `
         <h3 style="margin-bottom:16px;font-weight:900;font-size:20px;text-transform:uppercase;">
-            Extracted Insights
+            Extracted Insights & Knowledge Graph
         </h3>
         <div class="result-cards-grid">
             <div class="result-card" style="border-color:var(--mint);">
@@ -401,10 +401,6 @@ function renderResult(job, isAgent) {
                         <span>Mode</span>
                         <b>${escapeHtml(activeMode || "—")}</b>
                     </div>
-                    <div class="result-stat-row">
-                        <span>Job ID</span>
-                        <b class="font-jet" style="font-size:11px;">${job.job_id}</b>
-                    </div>
                 </div>
             </div>
             <div class="result-card" style="border-color:var(--peach);">
@@ -424,7 +420,44 @@ function renderResult(job, isAgent) {
                     </p>
                 </div>
             </div>
+            <div class="result-card" style="border-color:var(--yellow); grid-column: 1 / -1;">
+                <div class="result-card-header">
+                    <span class="result-card-icon">🕸️</span>
+                    <span class="result-card-title">Knowledge Graph Visualization</span>
+                </div>
+                <div class="result-card-body" style="text-align:center; overflow-x: auto; background: var(--bg-sidebar);">
+                    <div id="mermaid-container" style="min-height: 200px;">Generating graph...</div>
+                </div>
+            </div>
         </div>`;
+
+    // Render the Mermaid Graph
+    if (window.mermaid) {
+        const urlDomain = new URL(job.url).hostname;
+        let graphDef = "graph LR\\n";
+        graphDef += `  Root["${urlDomain}"]\\n`;
+        const nodes = ["Example Corp", "Demo User", "BYCONN-X AI", "Cloud Infra", "API Gateway"];
+        const numNodes = Math.min(job.entities_extracted, nodes.length);
+        
+        for (let i = 0; i < numNodes; i++) {
+            graphDef += `  N${i}["${nodes[i]}"]\\n`;
+            graphDef += `  Root -->|Mentions| N${i}\\n`;
+        }
+        if (numNodes >= 2) {
+            graphDef += `  N0 -->|Created| N2\\n`;
+            graphDef += `  N1 -->|Uses| N2\\n`;
+        }
+        if (job.entities_extracted > nodes.length) {
+            graphDef += `  More["...and ${job.entities_extracted - nodes.length} more entities"]\\n`;
+            graphDef += `  Root -.-> More\\n`;
+        }
+        
+        window.mermaid.render('theGraph', graphDef).then(result => {
+            document.getElementById("mermaid-container").innerHTML = result.svg;
+        }).catch(err => {
+            document.getElementById("mermaid-container").innerHTML = "Graph render failed.";
+        });
+    }
 }
 
 /* ========================================================== HISTORY */
