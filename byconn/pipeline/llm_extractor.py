@@ -28,10 +28,13 @@ retried once as a plain prompt.
 import ast
 import asyncio
 import base64
+import copy
+import hashlib
 import json
 import logging
 import os
 import re
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
 from .entity_extractor import EntityExtractor
@@ -39,6 +42,13 @@ from .entity_extractor import EntityExtractor
 logger = logging.getLogger("byconnx.pipeline.llm_extractor")
 
 DEFAULT_MAX_INPUT_TOKENS = 6000
+# Identical page text sent to the same model gives the same extraction, so
+# results are cached by content hash. Re-crawling a site, or pages that share
+# boilerplate-free text, then skip the LLM call entirely. 0 disables.
+DEFAULT_CACHE_SIZE = 256
+# Parallel page workers would otherwise fire requests in bursts and trip
+# free-tier rate limits (HTTP 429), which the backoff then pays for.
+DEFAULT_MAX_CONCURRENCY = 4
 
 # Defaults per provider. The openai branch covers every OpenAI-compatible
 # endpoint; local servers get a small open-weights model, hosted gets a cheap
@@ -114,6 +124,19 @@ def _env_float(key: str, default: float) -> float:
         return default
 
 
+def _env_int_allow_zero(key: str, default: int) -> int:
+    """Reads a non-negative int env var, where 0 is meaningful (disabled)."""
+    raw = os.getenv(key)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid integer for %s=%r; using %s", key, raw, default)
+        return default
+    return value if value >= 0 else default
+
+
 # 4xx responses other than 408/429 will not succeed on a retry.
 PERMANENT_STATUS_CODES = {400, 401, 403, 404, 405, 422}
 PERMANENT_ERROR_NAMES = (
@@ -166,6 +189,8 @@ class LLMExtractor(EntityExtractor):
         max_retries: Optional[int] = None,
         max_entities: int = 40,
         max_triples: int = 60,
+        cache_size: Optional[int] = None,
+        max_concurrency: Optional[int] = None,
     ) -> None:
         super().__init__(llm_client=None)
         # Resolve "auto" to a concrete provider once, so the provider, the API
@@ -184,6 +209,15 @@ class LLMExtractor(EntityExtractor):
         self.model = model or self._resolve_model()
         self.vision_model = vision_model or self._resolve_vision_model()
         self._client = None
+        self.cache_size = (
+            cache_size if cache_size is not None
+            else _env_int_allow_zero("LLM_CACHE_SIZE", DEFAULT_CACHE_SIZE)
+        )
+        self._cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        self.cache_hits = 0
+        self._max_concurrency = max_concurrency or _env_int("LLM_MAX_CONCURRENCY", DEFAULT_MAX_CONCURRENCY)
+        # Created lazily: a semaphore binds to the loop that first uses it.
+        self._semaphore: Optional[asyncio.Semaphore] = None
 
     # --- provider wiring ----------------------------------------------------
     @staticmethod
@@ -373,10 +407,38 @@ class LLMExtractor(EntityExtractor):
             return self.empty_result()
 
         prompt = self.build_extraction_prompt(self.truncate_to_budget(text_content))
-        raw = await self._call_with_retries(prompt)
+        key = self._cache_key(prompt)
+        cached = self._cache.get(key)
+        if cached is not None:
+            self._cache.move_to_end(key)
+            self.cache_hits += 1
+            logger.info("LLM extraction cache hit (%d so far).", self.cache_hits)
+            return copy.deepcopy(cached)
+
+        async with self._limiter():
+            raw = await self._call_with_retries(prompt)
         if raw is None:
             return self.empty_result()
-        return self.parse_response(raw)
+        result = self.parse_response(raw)
+        # Only real results are cached; a failure must be retried next time.
+        if self.cache_size and (result["entities"] or result["triples"]):
+            self._cache[key] = copy.deepcopy(result)
+            while len(self._cache) > self.cache_size:
+                self._cache.popitem(last=False)
+        return result
+
+    def _cache_key(self, prompt: str) -> str:
+        """Keys a result on everything that determines it."""
+        material = f"{self.provider}|{self.base_url}|{self.model}|{self.temperature}|{prompt}"
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+    def _limiter(self) -> asyncio.Semaphore:
+        """Returns the semaphore bounding concurrent provider calls."""
+        loop = asyncio.get_running_loop()
+        if self._semaphore is None or getattr(self, "_semaphore_loop", None) is not loop:
+            self._semaphore = asyncio.Semaphore(self._max_concurrency)
+            self._semaphore_loop = loop
+        return self._semaphore
 
     async def _call_with_retries(
         self, prompt: str, image: Optional[bytes] = None, model: Optional[str] = None
