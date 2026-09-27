@@ -606,6 +606,22 @@ async def process_page(
     return entry
 
 
+def is_first_party(host: str, site_url: str) -> bool:
+    """Whether ``host`` belongs to the crawled site: the same host, or a
+    subdomain of it, ignoring ports and a leading ``www.``.
+
+    Conservative on purpose: ``api.example.com`` counts for a crawl of
+    ``example.com``, but a sibling such as ``cdn.example.net`` does not.
+    """
+    def base(value: str) -> str:
+        value = (value or "").lower().split(":")[0].strip(".")
+        return value[4:] if value.startswith("www.") else value
+
+    site = base(urlparse(site_url).netloc)
+    candidate = base(host)
+    return bool(site) and (candidate == site or candidate.endswith("." + site))
+
+
 async def publish_discovered_apis(job: CrawlJob, sniffer: ProxySniffer) -> None:
     """Persists endpoints sniffed during a crawl and generates an OpenAPI spec.
 
@@ -618,7 +634,12 @@ async def publish_discovered_apis(job: CrawlJob, sniffer: ProxySniffer) -> None:
     )
     # Page loads are captured alongside real API calls; an API registry and a
     # generated spec should describe only the latter.
-    api_endpoints = [e for e in sniffer.endpoints if not generator.is_document(e)]
+    # Only the site's own backend. Pages also call analytics, ad and error
+    # trackers (Google Analytics, Sentry...), which are not the site's API.
+    api_endpoints = [
+        e for e in sniffer.endpoints
+        if not generator.is_document(e) and is_first_party(e.host, job.url)
+    ]
     job.endpoints_discovered = len(api_endpoints)
     if not api_endpoints:
         logger.info("Job %s: no API endpoints discovered.", job.job_id)
@@ -897,8 +918,9 @@ async def run_agent_task(job: AgentJob) -> None:
             finally:
                 await context.close()
             if sniffer is not None:
-                job.endpoints_discovered = len(sniffer.get_summary())
-                await publish_discovered_apis(_as_crawl_job(job.job_id), sniffer)
+                published = _as_crawl_job(job.job_id, job.url)
+                await publish_discovered_apis(published, sniffer)
+                job.endpoints_discovered = published.endpoints_discovered
             job.status = "succeeded"
             logger.info("Agent job %s finished after %d steps (succeeded=%s).",
                         job.job_id, job.steps_taken, job.succeeded)
@@ -918,9 +940,9 @@ async def run_agent_task(job: AgentJob) -> None:
             finish_job(job)
 
 
-def _as_crawl_job(job_id: str) -> CrawlJob:
+def _as_crawl_job(job_id: str, url: str) -> CrawlJob:
     """Adapter so agent runs can reuse the API-intelligence publisher."""
-    return CrawlJob(job_id=job_id, url="", max_depth=0)
+    return CrawlJob(job_id=job_id, url=url, max_depth=0)
 
 
 def _record(app_state: Any, job: CrawlJob) -> None:

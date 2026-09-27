@@ -488,6 +488,29 @@ class TestServerApiIntelligence:
         spec = json.loads(spec_file.read_text())
         assert "/api/v1/items" in spec["paths"]
 
+    def test_third_party_calls_are_not_the_sites_api(self, client, tmp_path):
+        """Analytics and error trackers were listed as the site's endpoints."""
+        client.app.state.output_dir = str(tmp_path)
+        sniffer = ProxySniffer()
+        for url in ("https://api.x.test/v1/items", "https://x.test/api/quotes",
+                    "https://www.google-analytics.com/j/collect",
+                    "https://o1.ingest.sentry.io/api/1/envelope/"):
+            sniffer.handle_request({"url": url, "method": "POST"})
+            sniffer.handle_response(url, {"content_type": "application/json", "status": 200, "body": "{}"})
+        job = server_module.CrawlJob(job_id="fp", url="https://www.x.test/page", max_depth=0)
+        run_async(server_module.publish_discovered_apis(job, sniffer))
+        hosts = sorted(e["host"] for e in client.app.state.postgres.discovered)
+        assert hosts == ["api.x.test", "x.test"]
+        assert job.endpoints_discovered == 2
+
+    @pytest.mark.parametrize("host, site, expected", [
+        ("x.test", "https://x.test/", True), ("www.x.test", "https://x.test", True),
+        ("api.x.test:8443", "https://www.x.test/a", True), ("evilx.test", "https://x.test", False),
+        ("x.test.evil.com", "https://x.test", False), ("x.test", "", False),
+    ])
+    def test_is_first_party(self, host, site, expected):
+        assert server_module.is_first_party(host, site) is expected
+
 
 # ==========================================================================
 # visual agent
