@@ -690,3 +690,98 @@ class TestEventStream:
         poll_job(client, job_id)
         _read_events(client, f"/api/v1/crawl/{job_id}/events")
         assert client.app.state.jobs[job_id].events.subscriber_count == 0
+
+
+class TestResultsApi:
+    def test_results_carry_pages_structured_and_a_real_graph(self, client):
+        job_id = _start(client, max_depth=1, prompt="x", schema=SCHEMA)["job_id"]
+        poll_job(client, job_id)
+        body = client.get(f"/api/v1/crawl/{job_id}/results").json()
+        assert body["job"]["job_id"] == job_id
+        assert len(body["pages"]) == 3
+        assert len(body["structured"]["data"]["pages"]) == 3
+        graph = body["graph"]
+        # FakeExtractor returns the same two entities for every page: they
+        # must be deduplicated, typed, and joined by the one real relation.
+        assert sorted(n["label"] for n in graph["nodes"]) == ["Alice", "Example Corp"]
+        types = {n["label"]: n["type"] for n in graph["nodes"]}
+        assert types == {"Alice": "PERSON", "Example Corp": "ORGANIZATION"}
+        assert [e["type"] for e in graph["edges"]] == ["EMPLOYS"]
+        assert graph["truncated"] is False
+
+    def test_results_fall_back_to_postgres_after_eviction(self, client):
+        job_id = _start(client, max_depth=0, prompt="x")["job_id"]
+        poll_job(client, job_id)
+        client.app.state.jobs.pop(job_id)
+        body = client.get(f"/api/v1/crawl/{job_id}/results").json()
+        assert body["job"]["status"] == "archived"
+        assert body["pages"][0]["url"] == "https://example.com/"
+
+    def test_unknown_results_are_404(self, client):
+        assert client.get("/api/v1/crawl/nope/results").status_code == 404
+
+    def test_graph_is_capped(self):
+        pages = [{"url": "u", "entities": [{"name": f"e{i}", "type": "CONCEPT"} for i in range(20)],
+                  "triples": [{"subject": "e0", "predicate": "LINKS", "object": "e19"}]}]
+        graph = server_module.build_graph(pages, cap=10)
+        assert len(graph["nodes"]) == 10 and graph["truncated"] is True
+        assert graph["edges"] == []  # e19 did not fit, so no dangling edge
+
+    def test_jobs_lists_newest_first(self, client):
+        first = start_crawl(client, "https://example.com/", 0)
+        second = start_crawl(client, "https://example.com/", 0)
+        poll_job(client, first)
+        poll_job(client, second)
+        jobs = client.get("/api/v1/jobs").json()["jobs"]
+        assert [j["job_id"] for j in jobs[:2]] == [second, first]
+        assert all(j["kind"] == "crawl" for j in jobs)
+
+
+class TestExport:
+    def _job(self, client):
+        job_id = _start(client, max_depth=1, prompt="x", schema=SCHEMA)["job_id"]
+        poll_job(client, job_id)
+        return job_id
+
+    def test_json_download(self, client):
+        job_id = self._job(client)
+        response = client.get(f"/api/v1/crawl/{job_id}/export?format=json")
+        assert response.status_code == 200
+        assert "attachment" in response.headers["content-disposition"]
+        assert json.loads(response.text)["job"]["job_id"] == job_id
+
+    def test_jsonl_has_one_page_per_line(self, client):
+        job_id = self._job(client)
+        lines = client.get(f"/api/v1/crawl/{job_id}/export?format=jsonl").text.splitlines()
+        assert len(lines) == 3 and all(json.loads(line)["url"] for line in lines)
+
+    def test_csv_flattens_the_array_with_sources(self, client):
+        job_id = self._job(client)
+        response = client.get(f"/api/v1/crawl/{job_id}/export?format=csv")
+        assert response.status_code == 200 and response.headers["content-type"].startswith("text/csv")
+        rows = response.text.strip().splitlines()
+        assert rows[0] == "url,sources"
+        assert len(rows) == 4
+
+    def test_csv_without_a_table_is_400(self, client):
+        job_id = start_crawl(client, "https://example.com/", 0)
+        poll_job(client, job_id)
+        response = client.get(f"/api/v1/crawl/{job_id}/export?format=csv")
+        assert response.status_code == 400 and "array of objects" in response.json()["detail"]
+
+    def test_unknown_format_is_400(self, client):
+        job_id = self._job(client)
+        assert client.get(f"/api/v1/crawl/{job_id}/export?format=xml").status_code == 400
+
+    def test_csv_neutralises_formulas(self):
+        result = {"data": {"rows": [{"a": "=HYPERLINK(\"x\")", "b": 2}]}, "citations": {}}
+        _field, columns, rows = server_module.structured_table(result)
+        assert columns == ["a", "b", "sources"]
+        assert rows[0][0].startswith("'=") and rows[0][1] == "2"
+
+
+class TestHealthDetail:
+    def test_llm_detail_names_the_model_but_never_a_key(self, client):
+        body = client.get("/api/v1/health").json()
+        assert body["llm"]["detail"] == "openai · fake-model"
+        assert "sk-" not in json.dumps(body) and "gsk_" not in json.dumps(body)

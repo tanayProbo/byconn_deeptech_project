@@ -16,6 +16,8 @@ resulting relations into Neo4j.
 """
 
 import asyncio
+import csv
+import io
 import json
 import logging
 import os
@@ -133,6 +135,10 @@ STRUCTURED_STEP_TIMEOUT = PIPELINE_STEP_TIMEOUT * 2
 # Idle SSE streams send a comment this often so proxies keep them open.
 SSE_HEARTBEAT_SECONDS = max(0.05, _env_float("SSE_HEARTBEAT_SECONDS", 15.0))
 TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
+# Largest knowledge graph returned to the dashboard.
+GRAPH_NODE_CAP = max(10, _env_int("GRAPH_NODE_CAP", 300))
+# Spreadsheet apps execute cells starting with these (CSV injection).
+CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 DEDUPLICATE_PAGES = _env_bool("CRAWL_DEDUPLICATE", True)
 API_INTELLIGENCE = _env_bool("API_INTELLIGENCE", True)
 
@@ -1071,6 +1077,185 @@ async def agent_events(job_id: str, request: Request) -> StreamingResponse:
     return _event_response(job, request)
 
 
+# =============================================================================
+# Results, history and export
+# =============================================================================
+def build_graph(pages: List[Dict[str, Any]], cap: int = GRAPH_NODE_CAP) -> Dict[str, Any]:
+    """Builds the knowledge graph from the entities and triples pages returned.
+
+    Nodes are deduplicated by case-folded name and typed from the entity
+    lists; every edge keeps the URL it was extracted from. At most ``cap``
+    nodes are returned, with ``truncated`` set when more existed.
+    """
+    nodes: Dict[str, Dict[str, Any]] = {}
+    edges: List[Dict[str, Any]] = []
+    seen_edges: Set[tuple] = set()
+    truncated = False
+
+    def node_id(name: Any, entity_type: Optional[str] = None) -> Optional[str]:
+        nonlocal truncated
+        label = str(name or "").strip()
+        key = label.casefold()
+        if not key:
+            return None
+        if key in nodes:
+            if entity_type and nodes[key]["type"] == "ENTITY":
+                nodes[key]["type"] = entity_type
+            return nodes[key]["id"]
+        if len(nodes) >= cap:
+            truncated = True
+            return None
+        nodes[key] = {"id": f"n{len(nodes)}", "label": label[:200], "type": entity_type or "ENTITY"}
+        return nodes[key]["id"]
+
+    for page in pages:
+        types: Dict[str, str] = {}
+        for entity in page.get("entities") or []:
+            if isinstance(entity, dict) and entity.get("name"):
+                entity_type = str(entity.get("type") or entity.get("entity_type") or "ENTITY").upper()
+                types[str(entity["name"]).strip().casefold()] = entity_type
+                node_id(entity["name"], entity_type)
+        for triple in page.get("triples") or []:
+            if not isinstance(triple, dict):
+                continue
+            subject, obj = triple.get("subject"), triple.get("object")
+            source = node_id(subject, types.get(str(subject or "").strip().casefold()))
+            target = node_id(obj, types.get(str(obj or "").strip().casefold()))
+            predicate = str(triple.get("predicate") or "").strip()
+            if not (source and target and predicate):
+                continue
+            key = (source, target, predicate.upper())
+            if key in seen_edges:
+                continue
+            seen_edges.add(key)
+            edges.append({
+                "source": source, "target": target,
+                "type": predicate, "source_url": page.get("url"),
+            })
+    return {"nodes": list(nodes.values()), "edges": edges, "truncated": truncated}
+
+
+async def _results_for(job_id: str) -> Dict[str, Any]:
+    """Collects a crawl's results from memory, or PostgreSQL once evicted."""
+    job = app.state.jobs.get(job_id)
+    if job is not None:
+        meta = job.to_dict()
+        pages = list(job.pages)
+        merged = job.structured or structured.empty_structured()
+    else:
+        try:
+            pages = await asyncio.wait_for(
+                app.state.postgres.list_extraction_results(job_id),
+                timeout=PIPELINE_STEP_TIMEOUT,
+            )
+        except Exception as exc:
+            logger.warning("Could not load archived results for %s: %s", job_id, exc)
+            pages = []
+        if not pages:
+            raise HTTPException(status_code=404, detail=f"Unknown job id: {job_id}")
+        # The job itself is gone from memory; only its stored pages remain.
+        meta = {"kind": "crawl", "job_id": job_id, "status": "archived", "url": pages[0].get("url")}
+        merged = structured.merge_structured(p.get("structured") for p in pages)
+    return {"job": meta, "pages": pages, "structured": merged, "graph": build_graph(pages)}
+
+
+@app.get("/api/v1/crawl/{job_id}/results")
+async def crawl_results(job_id: str) -> Dict[str, Any]:
+    """Everything a crawl produced: per-page results, the structured data with
+    citations, and the knowledge graph built from the extracted relations."""
+    return await _results_for(job_id)
+
+
+@app.get("/api/v1/jobs")
+async def list_jobs(limit: int = 50) -> Dict[str, Any]:
+    """Lists recent crawl and agent jobs, newest first."""
+    jobs = list(app.state.jobs.values()) + list(app.state.agent_jobs.values())
+    jobs.sort(key=lambda j: j.created_at, reverse=True)
+    limit = max(1, min(limit, MAX_JOBS_RETAINED))
+    return {"count": len(jobs), "jobs": [j.to_dict() for j in jobs[:limit]]}
+
+
+def _csv_cell(value: Any) -> str:
+    """Renders one CSV cell, neutralising spreadsheet formulas."""
+    if value is None:
+        return ""
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    if isinstance(value, str) and text.startswith(CSV_FORMULA_PREFIXES):
+        text = "'" + text
+    return text
+
+
+def structured_table(result: Dict[str, Any], field_name: str = "") -> Optional[tuple]:
+    """Finds the array of objects in structured data that a CSV should hold.
+
+    Returns ``(field, columns, rows)`` or None. Each row gains a ``sources``
+    column listing the URLs its verified citations came from.
+    """
+    data = result.get("data") or {}
+    if not isinstance(data, dict):
+        return None
+    candidates = [
+        key for key, value in data.items()
+        if isinstance(value, list) and value and all(isinstance(v, dict) for v in value)
+    ]
+    if field_name:
+        candidates = [key for key in candidates if key == field_name]
+    if not candidates:
+        return None
+    key = candidates[0]
+    items = data[key]
+    columns: List[str] = []
+    for item in items:
+        for column in item:
+            if column not in columns:
+                columns.append(column)
+    citations = result.get("citations") or {}
+    prefix = "/" + structured.escape_token(key) + "/"
+    rows = []
+    for index, item in enumerate(items):
+        row = [_csv_cell(item.get(column)) for column in columns]
+        sources = sorted({
+            quote.get("url") for pointer, quotes in citations.items()
+            if pointer.startswith(f"{prefix}{index}/") for quote in quotes if quote.get("url")
+        })
+        rows.append(row + [" ".join(sources)])
+    return key, columns + ["sources"], rows
+
+
+@app.get("/api/v1/crawl/{job_id}/export")
+async def export_results(job_id: str, format: str = "json", field: str = "") -> Response:
+    """Downloads a crawl's results as json, jsonl (one page per line) or csv
+    (the array of objects in the structured data)."""
+    results = await _results_for(job_id)
+    stem = f"byconn-{job_id[:8]}"
+    if format == "json":
+        body, media, ext = json.dumps(results, indent=2, default=str), "application/json", "json"
+    elif format == "jsonl":
+        body = "".join(json.dumps(page, default=str) + "\n" for page in results["pages"])
+        media, ext = "application/x-ndjson", "jsonl"
+    elif format == "csv":
+        table = structured_table(results["structured"], field)
+        if table is None:
+            raise HTTPException(
+                status_code=400,
+                detail="CSV needs structured data containing an array of objects; "
+                       "run the crawl with a schema that has one, or export json.",
+            )
+        _key, columns, rows = table
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(columns)
+        writer.writerows(rows)
+        body, media, ext = buffer.getvalue(), "text/csv", "csv"
+    else:
+        raise HTTPException(status_code=400, detail="format must be json, jsonl or csv")
+    return Response(
+        content=body,
+        media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{stem}.{ext}"'},
+    )
+
+
 @app.get("/api/v1/apis")
 async def list_discovered_apis(host: str = "", limit: int = 100) -> Dict[str, Any]:
     """Lists REST endpoints sniffed from previous crawls."""
@@ -1116,7 +1301,11 @@ async def health(response: Response) -> HealthResponse:
     llm = ComponentStatus(
         name="llm",
         status="up" if extractor.is_available else "disabled",
-        detail=None if extractor.is_available else "no API key configured",
+        # Provider and model only; the credential never leaves the server.
+        detail=(
+            f"{extractor.provider} · {extractor.model}"
+            if extractor.is_available else "no API key configured"
+        ),
     )
     embedder = app.state.embedder
     embeddings = ComponentStatus(
