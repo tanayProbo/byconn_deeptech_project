@@ -3,6 +3,7 @@
 No live network or browser is required.
 """
 
+import asyncio
 import time
 
 import pytest
@@ -431,3 +432,107 @@ class TestBaseCrawlerWorkerLoop:
             navigation_timeout=5000,
         )
         assert crawler.navigation_timeout == 5000
+
+
+class TestBaseCrawlerWorkerResilience:
+    """Regressions for failures between get_next() and the handler."""
+
+    @staticmethod
+    def _pool(fail_first_context: int = 0, status: int = 200):
+        state = {"contexts": 0, "closed": 0}
+
+        class _Response:
+            def __init__(self, code):
+                self.status = code
+
+        class _Page(FakePage):
+            async def goto(self, url, wait_until=None, timeout=None):
+                return _Response(status)
+
+            async def close(self):
+                state["closed"] += 1
+
+        class _Ctx:
+            async def new_page(self):
+                return _Page("https://a.test/")
+
+            async def close(self):
+                return None
+
+        class _Pool:
+            async def initialize(self):
+                return None
+
+            async def new_context(self):
+                state["contexts"] += 1
+                if state["contexts"] <= fail_first_context:
+                    raise RuntimeError("browser crashed")
+                return _Ctx()
+
+            async def close(self):
+                return None
+
+        return _Pool(), state
+
+    @staticmethod
+    def _crawl(pool, handler, **kwargs):
+        from byconn.core.session_pool import SessionPool
+
+        async def scenario():
+            queue = RequestQueue()
+            await queue.add(CrawlRequest("https://a.test/"))
+            crawler = BaseCrawler(
+                request_queue=queue, browser_pool=pool,
+                session_pool=SessionPool(), concurrency=1, **kwargs,
+            )
+            await crawler.run(handler)
+            # Before the fix this hung forever: the worker died holding the lock.
+            await asyncio.wait_for(crawler.wait_for_completion(), timeout=15)
+            return queue
+
+        return run_async(scenario())
+
+    def test_context_creation_failure_is_retried_not_fatal(self):
+        pool, state = self._pool(fail_first_context=1)
+        handled = []
+
+        async def handler(request, page):
+            handled.append(request.url)
+
+        self._crawl(pool, handler)
+        assert handled == ["https://a.test/"]
+        assert state["contexts"] == 2
+
+    def test_real_http_status_is_recorded(self):
+        pool, _ = self._pool(status=404)
+        seen = []
+
+        async def handler(request, page):
+            seen.append(request.payload.get("status_code"))
+
+        self._crawl(pool, handler)
+        assert seen == [404]
+
+    def test_handler_timeout_is_not_retried(self):
+        pool, state = self._pool()
+        calls = []
+
+        async def slow_handler(request, page):
+            calls.append(request.url)
+            await asyncio.sleep(5)
+
+        queue = self._crawl(pool, slow_handler, handler_timeout=0.05)
+        assert calls == ["https://a.test/"]
+        assert state["closed"] == 1
+        assert not queue.in_progress
+
+    def test_lock_outlasts_navigation_and_handler(self):
+        from byconn.core.session_pool import SessionPool
+
+        queue = RequestQueue(lock_duration_sec=60)
+        BaseCrawler(
+            request_queue=queue, browser_pool=FakeBrowserPool(),
+            session_pool=SessionPool(), navigation_timeout=30000,
+            handler_timeout=150,
+        )
+        assert queue.lock_duration_sec >= 30 + 150
