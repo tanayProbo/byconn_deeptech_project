@@ -544,12 +544,17 @@ async def process_page(
             )
 
     async def store_graph() -> None:
-        if not triples:
+        # Entities are linked to their page even when the model found no
+        # relations; previously a page without triples left nothing in Neo4j.
+        if not (entities or triples):
             return
         await guarded_step(job, url, "neo4j page upsert",
                            app.state.neo4j.upsert_page(url, title=title, job_id=job.job_id))
-        await guarded_step(job, url, "neo4j entity links",
-                           app.state.neo4j.link_page_entities(url, entities))
+        if entities:
+            await guarded_step(job, url, "neo4j entity links",
+                               app.state.neo4j.link_page_entities(url, entities))
+        if not triples:
+            return
         # Count only the triples Neo4j actually accepted. Counting the extracted
         # triples would report a healthy result while every write had failed.
         written = await guarded_step(

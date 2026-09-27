@@ -828,3 +828,14 @@ def test_rerunning_a_crawl_is_not_deduplicated_against_the_first(client):
     assert first["duplicates_skipped"] == 0
     assert second["duplicates_skipped"] == 0
     assert second["entities_extracted"] == first["entities_extracted"] > 0
+
+
+def test_entities_reach_neo4j_even_without_relations(client, monkeypatch):
+    """A page whose extraction had entities but no triples left Neo4j empty."""
+    extractor = client.app.state.extractor
+    monkeypatch.setattr(extractor, "CANNED", {**extractor.CANNED, "triples": []})
+    job = poll_job(client, start_crawl(client, "https://example.com/", 0))
+    neo4j = client.app.state.neo4j
+    assert neo4j.pages == ["https://example.com/"]
+    assert [len(entities) for _url, entities in neo4j.links] == [2]
+    assert neo4j.triples == [] and job["relations_written"] == 0
