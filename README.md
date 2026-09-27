@@ -297,6 +297,7 @@ the site's own XHR traffic and writes an OpenAPI spec to `byconn_output/`.
 | `"embeddings": "disabled"` | No embedding provider. Run `pip install -e ".[local-embeddings]"` or set a real hosted `OPENAI_API_KEY`. |
 | `"llm": "disabled"` | No LLM endpoint configured. Set `OPENAI_API_KEY=ollama` for a local model, `GROQ_API_KEY` for the free tier, or `OPENAI_API_KEY` / `GEMINI_API_KEY`. Pages are still crawled and stored. |
 | `Executable doesn't exist ... chromium` | Run `playwright install chromium`. |
+| `llm extraction timed out` with a local model | Local servers such as Ollama answer one request at a time, so a page's calls queue behind each other. Raise `PIPELINE_STEP_TIMEOUT` (for example `600`) and lower `LLM_MAX_CONCURRENCY`. |
 
 ---
 
