@@ -587,8 +587,9 @@ class _FakePool:
     async def executemany(self, query, rows):
         self.sink["executemany"].append((query, rows))
 
-    async def fetchval(self, query):
+    async def fetchval(self, query, *args):
         self.sink["fetchval"].append(query)
+        self.sink.setdefault("fetchval_args", []).append(args)
         return 1 if query.strip() == "SELECT 1" else 7
 
     async def close(self):
@@ -639,6 +640,36 @@ class TestPostgresAdapter:
         assert written == 1
         _query, rows = sink["executemany"][0]
         assert rows[0][2] == "ORG"
+
+    def test_extraction_result_round_trip_shapes(self, postgres):
+        adapter, sink = postgres
+        row_id = run_async(adapter.insert_extraction_result({
+            "job_id": "j1", "url": "https://a.test/", "title": "A",
+            "summary": "s", "topics": ("t",), "model": "m",
+            "structured": {"data": {"x": 1}, "citations": {"/x": [{"quote": "q"}]},
+                           "unverified": []},
+        }))
+        assert row_id == 7
+        args = sink["fetchval_args"][-1]
+        assert args[0] == "j1" and args[5] == ["t"] and args[8] == {"x": 1}
+
+        sink_rows = [{"job_id": "j1", "url": "u", "title": None, "status_code": 200,
+                      "summary": "s", "topics": [], "entities": [], "triples": [],
+                      "data": {"x": 1}, "citations": {}, "unverified": ["/x"],
+                      "model": "m", "created_at": None}]
+
+        async def fetch(query, *a):
+            return sink_rows
+
+        adapter._pool.fetch = fetch
+        pages = run_async(adapter.list_extraction_results("j1"))
+        assert pages[0]["structured"] == {"data": {"x": 1}, "citations": {}, "unverified": ["/x"]}
+        assert "data" not in pages[0]
+
+    def test_schema_creates_extraction_results(self, postgres):
+        from byconn.storage.adapters import SCHEMA_SQL
+
+        assert "CREATE TABLE IF NOT EXISTS extraction_results" in SCHEMA_SQL
 
     def test_insert_entities_noop_on_empty(self, postgres):
         adapter, sink = postgres

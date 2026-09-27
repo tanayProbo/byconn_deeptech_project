@@ -369,6 +369,26 @@ CREATE TABLE IF NOT EXISTS discovered_apis (
 
 CREATE INDEX IF NOT EXISTS idx_discovered_apis_host ON discovered_apis (host);
 CREATE INDEX IF NOT EXISTS idx_discovered_apis_path ON discovered_apis (path);
+
+-- Per-page LLM results: summary/topics and schema-driven data with citations.
+CREATE TABLE IF NOT EXISTS extraction_results (
+    id            BIGSERIAL PRIMARY KEY,
+    job_id        TEXT        NOT NULL,
+    url           TEXT        NOT NULL,
+    title         TEXT,
+    status_code   INTEGER,
+    summary       TEXT,
+    topics        JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    entities      JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    triples       JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    data          JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    citations     JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    unverified    JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    model         TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_extraction_results_job_id ON extraction_results (job_id);
 """
 
 
@@ -704,9 +724,68 @@ class PostgresAdapter(BaseAdapter):
         )
         return [dict(row) for row in rows]
 
+    async def insert_extraction_result(self, result: Dict[str, Any]) -> int:
+        """Stores one page's LLM results. Returns the new row id.
+
+        ``result`` carries ``job_id`` and ``url`` plus any of ``title``,
+        ``status_code``, ``summary``, ``topics``, ``entities``, ``triples``,
+        ``model`` and a ``structured`` dict with ``data``, ``citations`` and
+        ``unverified``.
+        """
+        await self._ensure()
+        structured = result.get("structured") or {}
+        return await self._require_pool().fetchval(
+            """
+            INSERT INTO extraction_results
+                (job_id, url, title, status_code, summary, topics, entities,
+                 triples, data, citations, unverified, model)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            RETURNING id
+            """,
+            result["job_id"],
+            result["url"],
+            result.get("title"),
+            result.get("status_code"),
+            result.get("summary"),
+            list(result.get("topics") or []),
+            list(result.get("entities") or []),
+            list(result.get("triples") or []),
+            structured.get("data") or {},
+            structured.get("citations") or {},
+            list(structured.get("unverified") or []),
+            result.get("model"),
+        )
+
+    async def list_extraction_results(self, job_id: str, limit: int = 500) -> List[Dict[str, Any]]:
+        """Lists a job's per-page results in crawl order."""
+        await self._ensure()
+        rows = await self._require_pool().fetch(
+            """
+            SELECT job_id, url, title, status_code, summary, topics, entities,
+                   triples, data, citations, unverified, model, created_at
+            FROM extraction_results
+            WHERE job_id = $1
+            ORDER BY id
+            LIMIT $2
+            """,
+            job_id,
+            limit,
+        )
+        pages = []
+        for row in rows:
+            item = dict(row)
+            item["structured"] = {
+                "data": item.pop("data"),
+                "citations": item.pop("citations"),
+                "unverified": item.pop("unverified"),
+            }
+            pages.append(item)
+        return pages
+
     async def count_rows(self, table: str) -> int:
         """Returns the row count of a whitelisted table, for health checks."""
-        allowed = {"crawled_pages", "extracted_entities", "api_health_checks", "discovered_apis"}
+        allowed = {"crawled_pages", "extracted_entities", "api_health_checks",
+                   "discovered_apis", "extraction_results"}
         if table not in allowed:
             raise ValueError(f"Unsupported table: {table!r}; expected one of {sorted(allowed)}")
         await self._ensure()

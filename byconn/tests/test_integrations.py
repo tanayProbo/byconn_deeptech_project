@@ -817,6 +817,25 @@ class TestVisualBrowserAgent:
         page = page or _StubPage()
         return VisualBrowserAgent(page, planner=planner, step_delay=0)
 
+    def test_on_step_sees_every_step_and_cannot_break_the_task(self):
+        class _ScrollThenStop:
+            calls = 0
+
+            async def plan(self, goal, nodes, url="", screenshot=None):
+                self.calls += 1
+                return {"type": "scroll", "delta": 10} if self.calls == 1 else {"type": "stop"}
+
+        seen = []
+
+        def observer(record):
+            seen.append(record["action"]["type"])
+            raise RuntimeError("observer bug")
+
+        agent = VisualBrowserAgent(_StubPage(), planner=_ScrollThenStop(), step_delay=0,
+                                   on_step=observer)
+        assert run_async(agent.execute_task("g", max_steps=3)) is True
+        assert seen == ["scroll", "stop"]
+
     def test_executes_until_the_planner_stops(self):
         class _StopAfterType:
             def __init__(self):

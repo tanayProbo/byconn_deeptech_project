@@ -1,6 +1,6 @@
 import logging
 import asyncio
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from playwright.async_api import Page
 from .dom_parser import DOMParser
 from .planner import build_planner
@@ -30,12 +30,15 @@ class VisualBrowserAgent:
         llm_client: Any = None,
         planner: Optional[Any] = None,
         step_delay: float = STEP_DELAY_SECONDS,
+        on_step: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
         self.page = page
         self.llm_client = llm_client
         self.dom_parser = DOMParser()
         self.planner = planner if planner is not None else build_planner()
         self.step_delay = step_delay
+        # Called with each history record as it is taken, for live progress.
+        self.on_step = on_step
         # Observation/action trace, useful for debugging and for API responses.
         self.history: List[Dict[str, Any]] = []
         # Why the last run ended without reaching its goal, if it did.
@@ -88,6 +91,11 @@ class VisualBrowserAgent:
                 "node_count": len(nodes),
                 "action": action,
             })
+            if self.on_step is not None:
+                try:
+                    self.on_step(self.history[-1])
+                except Exception as exc:  # observers must never break the task
+                    logger.debug("on_step callback failed: %s", exc)
 
             if action.get("type") == "stop":
                 if action.get("error"):

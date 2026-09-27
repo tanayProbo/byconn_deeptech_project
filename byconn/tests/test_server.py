@@ -6,6 +6,7 @@ the health contract without any external service.
 """
 
 import asyncio
+import json
 
 import pytest
 
@@ -586,3 +587,106 @@ class TestSeedRobots:
         assert job["status"] == "failed"
         assert job["pages_crawled"] == 0
         assert any("robots.txt disallows" in e for e in job["errors"])
+
+
+SCHEMA = {
+    "type": "object",
+    "properties": {"pages": {"type": "array", "items": {"type": "object"}}},
+}
+
+
+def _start(client, **body):
+    response = client.post("/api/v1/crawl", json={"url": "https://example.com/", **body})
+    assert response.status_code == 202, response.text
+    return response.json()
+
+
+class TestStructuredCrawl:
+    def test_prompt_and_schema_reach_the_extractor_and_merge(self, client):
+        accepted = _start(client, max_depth=1, prompt="list the pages", schema=SCHEMA)
+        assert accepted["prompt"] == "list the pages" and accepted["has_schema"] is True
+        job = poll_job(client, accepted["job_id"])
+        calls = client.app.state.extractor.structured_calls
+        assert calls and calls[0]["instruction"] == "list the pages"
+        assert calls[0]["schema"] == SCHEMA
+        stored = client.app.state.jobs[accepted["job_id"]]
+        urls = sorted(p["url"] for p in stored.structured["data"]["pages"])
+        assert urls == ["https://example.com/", "https://example.com/a", "https://example.com/b"]
+        assert job["fields_verified"] == 3 and job["fields_unverified"] == 0
+
+    def test_plain_crawl_does_not_run_structured_extraction(self, client):
+        poll_job(client, start_crawl(client, "https://example.com/", 0))
+        assert client.app.state.extractor.structured_calls == []
+
+    @pytest.mark.parametrize("schema", [{"type": "array"}, {"type": "object", "properties": 3}])
+    def test_invalid_schema_is_rejected(self, client, schema):
+        response = client.post("/api/v1/crawl", json={"url": "https://example.com/", "schema": schema})
+        assert response.status_code == 422
+
+    def test_page_results_are_kept_and_persisted(self, client):
+        job_id = _start(client, max_depth=0, prompt="x")["job_id"]
+        poll_job(client, job_id)
+        page = client.app.state.jobs[job_id].pages[0]
+        assert page["summary"] == "An example page."
+        assert page["entities"][0]["name"] == "Example Corp"
+        stored = client.app.state.postgres.extraction_results
+        assert stored[0]["job_id"] == job_id and stored[0]["structured"]["data"]
+
+    def test_results_survive_a_dead_postgres(self, client):
+        client.app.state.postgres.fail = True
+        job_id = _start(client, max_depth=0, prompt="x")["job_id"]
+        job = poll_job(client, job_id)
+        assert job["status"] == "succeeded"
+        assert client.app.state.jobs[job_id].pages[0]["structured"]["data"]
+        assert any("result insert failed" in e for e in job["errors"])
+
+
+def _read_events(client, path):
+    events = []
+    with client.stream("GET", path) as response:
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        name = None
+        for line in response.iter_lines():
+            if line.startswith("event: "):
+                name = line[len("event: "):]
+            elif line.startswith("data: "):
+                events.append((name, json.loads(line[len("data: "):])))
+    return events
+
+
+class TestEventStream:
+    def test_live_crawl_streams_snapshot_pages_then_done(self, client):
+        client.app.state.extractor.delay = 0.3
+        job_id = _start(client, max_depth=0)["job_id"]
+        events = _read_events(client, f"/api/v1/crawl/{job_id}/events")
+        names = [name for name, _ in events]
+        assert names[0] == "snapshot" and names[-1] == "done"
+        assert "page" in names
+        page = next(data for name, data in events if name == "page")
+        assert page["page"]["url"] == "https://example.com/"
+        assert events[-1][1]["status"] == "succeeded"
+
+    def test_finished_job_gets_snapshot_and_done_immediately(self, client):
+        job_id = start_crawl(client, "https://example.com/", 0)
+        poll_job(client, job_id)
+        names = [name for name, _ in _read_events(client, f"/api/v1/crawl/{job_id}/events")]
+        assert names == ["snapshot", "done"]
+
+    def test_errors_are_streamed_once(self, client):
+        client.app.state.postgres.fail = True
+        client.app.state.extractor.delay = 0.3
+        job_id = _start(client, max_depth=0)["job_id"]
+        events = _read_events(client, f"/api/v1/crawl/{job_id}/events")
+        messages = [data["message"] for name, data in events if name == "error"]
+        assert messages and len(messages) == len(set(messages))
+
+    def test_unknown_job_is_404(self, client):
+        assert client.get("/api/v1/crawl/nope/events").status_code == 404
+        assert client.get("/api/v1/act/nope/events").status_code == 404
+
+    def test_subscribers_are_released(self, client):
+        job_id = start_crawl(client, "https://example.com/", 0)
+        poll_job(client, job_id)
+        _read_events(client, f"/api/v1/crawl/{job_id}/events")
+        assert client.app.state.jobs[job_id].events.subscriber_count == 0
