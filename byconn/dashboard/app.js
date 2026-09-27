@@ -434,22 +434,22 @@ function renderResult(job, isAgent) {
     // Render the Mermaid Graph
     if (window.mermaid) {
         const urlDomain = new URL(job.url).hostname;
-        let graphDef = "graph LR\\n";
-        graphDef += `  Root["${urlDomain}"]\\n`;
+        let graphDef = "graph LR\n";
+        graphDef += `  Root["${urlDomain}"]\n`;
         const nodes = ["Example Corp", "Demo User", "BYCONN-X AI", "Cloud Infra", "API Gateway"];
         const numNodes = Math.min(job.entities_extracted, nodes.length);
         
         for (let i = 0; i < numNodes; i++) {
-            graphDef += `  N${i}["${nodes[i]}"]\\n`;
-            graphDef += `  Root -->|Mentions| N${i}\\n`;
+            graphDef += `  N${i}["${nodes[i]}"]\n`;
+            graphDef += `  Root -->|Mentions| N${i}\n`;
         }
-        if (numNodes >= 2) {
-            graphDef += `  N0 -->|Created| N2\\n`;
-            graphDef += `  N1 -->|Uses| N2\\n`;
+        if (numNodes >= 3) {
+            graphDef += `  N0 -->|Created| N2\n`;
+            graphDef += `  N1 -->|Uses| N2\n`;
         }
         if (job.entities_extracted > nodes.length) {
-            graphDef += `  More["...and ${job.entities_extracted - nodes.length} more entities"]\\n`;
-            graphDef += `  Root -.-> More\\n`;
+            graphDef += `  More["...and ${job.entities_extracted - nodes.length} more entities"]\n`;
+            graphDef += `  Root -.-> More\n`;
         }
         
         window.mermaid.render('theGraph', graphDef).then(result => {
