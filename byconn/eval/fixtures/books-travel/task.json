@@ -1,0 +1,32 @@
+{
+  "url": "https://books.toscrape.com/catalogue/category/books/travel_2/index.html",
+  "instruction": "Extract every book listed on this catalogue page with its title and price.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "products": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "price": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ]
+        }
+      }
+    }
+  },
+  "records_field": "products",
+  "key": "name",
+  "fields": [
+    "name",
+    "price"
+  ]
+}

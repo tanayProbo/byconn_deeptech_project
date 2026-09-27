@@ -1,0 +1,32 @@
+{
+  "url": "https://synthetic.example/synthetic-laptops",
+  "instruction": "Extract every laptop in the comparison table with its current price (not the previous price).",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "products": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "model": {
+              "type": "string"
+            },
+            "price": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "model"
+          ]
+        }
+      }
+    }
+  },
+  "records_field": "products",
+  "key": "model",
+  "fields": [
+    "model",
+    "price"
+  ]
+}

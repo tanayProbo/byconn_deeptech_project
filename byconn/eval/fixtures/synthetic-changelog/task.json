@@ -1,0 +1,32 @@
+{
+  "url": "https://synthetic.example/synthetic-changelog",
+  "instruction": "Extract every release with its version number and release date as written.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "releases": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string"
+            },
+            "date": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "version"
+          ]
+        }
+      }
+    }
+  },
+  "records_field": "releases",
+  "key": "version",
+  "fields": [
+    "version",
+    "date"
+  ]
+}

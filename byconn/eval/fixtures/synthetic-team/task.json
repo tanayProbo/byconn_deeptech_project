@@ -1,0 +1,32 @@
+{
+  "url": "https://synthetic.example/synthetic-team",
+  "instruction": "Extract every member of the company's team with their role. Do not include customers.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "people": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "role": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ]
+        }
+      }
+    }
+  },
+  "records_field": "people",
+  "key": "name",
+  "fields": [
+    "name",
+    "role"
+  ]
+}

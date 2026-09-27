@@ -1,0 +1,32 @@
+{
+  "url": "https://synthetic.example/synthetic-menu",
+  "instruction": "Extract every dish on the menu with its price.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "dishes": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "dish": {
+              "type": "string"
+            },
+            "price": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "dish"
+          ]
+        }
+      }
+    }
+  },
+  "records_field": "dishes",
+  "key": "dish",
+  "fields": [
+    "dish",
+    "price"
+  ]
+}
