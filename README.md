@@ -525,21 +525,28 @@ below comes from a real run.
 
 | Model | Where | Field P | Field R | Field F1 | Values with a verified quote | Schema-valid | Latency p50 / p95 | Run |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `qwen3-coder-30b` (MoE, 3B active) | local (Ollama), 1800-token windows | 99.7% | 99.5% | 99.6% | 100.0% | 100% | 21s / 71s | [2026-09-27](byconn/eval/results/2026-09-27-qwen3-coder-30b-local_latest.md) |
 | `llava` 7B | local (Ollama), 1800-token windows | 75.5% | 63.4% | 69.0% | 88.7% | 80% | 21s / 58s | [2026-09-27](byconn/eval/results/2026-09-27-llava.md) |
 
-This is a deliberately modest baseline: a small, general vision model on a
-laptop, with no tuning. It gives useful lessons:
+Both runs used the same fixtures, settings and hardware (a laptop, no GPU
+server), and neither model was tuned for this.
 
-- **The citation check catches invention.** On `books-history` the model
-  invented 16 records, and 16 values came back flagged unverified. Across all
-  fixtures, 35 invented records cost precision, and the
-  UI and exports mark their values instead of presenting them as facts.
-- **Format failures dominate the misses.** Three fixtures got no parseable JSON
-  at all (F1 0), so the gap to a stronger model is mostly reliability, not
-  reading ability. The 17 fixtures it did parse averaged 0.83 F1.
-- **Traps work.** The struck-through price, "was" column and past-events
-  fixtures (`synthetic-pricing`, `synthetic-laptops`, `synthetic-events`) are
-  where a careless reader loses points.
+- **Model choice matters more than anything else here.** The small vision
+  model (llava) returned no parseable JSON on three fixtures and invented 35
+  records. The 30B mixture-of-experts coder model returned valid, schema-shaped
+  JSON every time, invented nothing, and every value it gave was backed by a
+  quote found on the page.
+- **The citation check catches invention.** On `books-history`, llava invented
+  16 records, and 16 values came back flagged unverified. The UI and exports
+  mark such values instead of presenting them as facts.
+- **The one remaining miss is ours, not the model's.** On `synthetic-pricing`
+  the old Team price is struck through with CSS. The HTML-to-Markdown cleaner
+  drops that styling, so the model sees "$15 $12" and reports both. Preserving
+  strike-through (`<del>`, `<s>`, `text-decoration: line-through`) in the
+  cleaner is the next fix.
+- **These fixtures are still easy.** 20 mostly clean pages is a regression
+  suite, not a benchmark. Harder pages (long tables, pagination, prices in
+  images) come next.
 
 Add a row by running the eval with another model. Numbers are only ever copied
 from a results file.
