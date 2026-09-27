@@ -3,271 +3,175 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BYCONN-X SEARCH ENGINE</title>
-    <!-- Modern Premium Typography -->
+    <title>BYCONN-X Console</title>
+    <meta name="description" content="BYCONN-X: crawl a site, extract schema-shaped data with verified citations, and build a knowledge graph.">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700;800&family=Press+Start+2P&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
+    <a class="skip-link" href="#main">Skip to content</a>
     <div class="app-container">
-        <!-- Sidebar Navigation -->
+
         <aside class="sidebar">
             <div class="logo-area">
-                <span class="logo-icon">👁️</span>
+                <span class="logo-icon" aria-hidden="true">◆</span>
                 <div class="logo-text">
                     <h1>BYCONN-X</h1>
-                    <span class="logo-tagline">AI SEARCH PORTAL</span>
+                    <span class="logo-tagline">DATA ACQUISITION ENGINE</span>
                 </div>
             </div>
-            
-            <nav class="nav-links">
-                <a href="#" class="nav-item active" data-tab="new-search">
-                    <span class="nav-icon">🔍</span> New Search
-                </a>
-                <a href="#" class="nav-item" data-tab="history">
-                    <span class="nav-icon">📁</span> Search History
-                </a>
-                <a href="#" class="nav-item" data-tab="saved">
-                    <span class="nav-icon">⭐</span> Saved Insights
-                </a>
-                <a href="#" class="nav-item" data-tab="api-keys">
-                    <span class="nav-icon">🔑</span> API Keys
-                </a>
-                <a href="#" class="nav-item" data-tab="api-discovery">
-                    <span class="nav-icon">🛰️</span> API Discovery
-                </a>
+
+            <nav class="nav-links" aria-label="Sections">
+                <button type="button" class="nav-item active" data-tab="new-search" aria-current="page">New Search</button>
+                <button type="button" class="nav-item" data-tab="history">Job History</button>
+                <button type="button" class="nav-item" data-tab="health">Service Health</button>
+                <button type="button" class="nav-item" data-tab="api-discovery">API Discovery</button>
             </nav>
 
             <div class="sidebar-footer">
-                <div class="status-indicator">
-                    <span class="dot pulse"></span>
+                <div class="status-indicator" role="status">
+                    <span class="dot pulse" aria-hidden="true"></span>
                     <span>ENGINE: <b>CHECKING&hellip;</b></span>
                 </div>
+                <p class="engine-model" id="engine-model"></p>
             </div>
         </aside>
 
-        <!-- Main Content Area -->
-        <main class="main-content">
-            <!-- Header -->
+        <main class="main-content" id="main">
             <header class="main-header">
                 <div class="header-left">
                     <h2 id="page-title">New Search</h2>
-                    <p id="page-subtitle" class="text-muted">Command the AI Agent to fetch and analyze data.</p>
-                </div>
-                <div class="header-right">
-                    <div class="workspace-selector">
-                        <span class="ws-label">Agent Mode:</span>
-                        <select class="ws-select">
-                            <option>Deep Research</option>
-                            <option>Fast Scrape</option>
-                            <option>Visual Action</option>
-                        </select>
-                    </div>
+                    <p id="page-subtitle" class="text-muted">Crawl a site and extract exactly the data you describe.</p>
                 </div>
             </header>
 
-            <!-- TAB PANELS -->
             <div class="tab-panels">
-                
-                <!-- 1. New Search Tab -->
-                <section class="tab-panel active" id="panel-new-search">
-                    
+
+                <!-- 1. New search -->
+                <section class="tab-panel active" id="panel-new-search" aria-labelledby="page-title">
                     <div class="search-header-panel">
-                        <h3>Ask Anything or Provide a URL</h3>
-                        <p class="text-muted" style="margin-bottom: 24px;">The AI will crawl the required sources, extract data, and present insights.</p>
-                        
-                        <div class="search-input-wrapper" style="flex-direction: column;">
-                            <input type="text" placeholder="e.g., Extract all pricing plans from https://stripe.com/pricing" id="main-search-input" style="width: 100%;">
-                            
-                            <div style="display: flex; gap: 16px; margin-top: 16px;">
-                                <button class="btn btn-primary" onclick="startSearch()">🚀 Launch Agent</button>
-                                <button class="btn btn-secondary">Clear</button>
-                            </div>
+                        <label for="main-search-input" class="field-label">What should the engine fetch?</label>
+                        <p class="text-muted hint">A URL or bare domain, optionally with an instruction:
+                            <span class="font-jet">books.toscrape.com extract every book title and price</span></p>
+                        <div class="search-input-wrapper">
+                            <input type="text" id="main-search-input" autocomplete="off" spellcheck="false"
+                                   placeholder="e.g. books.toscrape.com extract every book title and price">
                         </div>
+
+                        <div class="search-controls">
+                            <label class="ws-label" for="mode-select">Mode</label>
+                            <select class="ws-select" id="mode-select">
+                                <option>Fast Scrape</option>
+                                <option>Deep Research</option>
+                                <option>Visual Action</option>
+                            </select>
+                            <button type="button" class="btn btn-primary" id="launch-btn">Launch</button>
+                            <button type="button" class="btn btn-secondary" id="clear-btn">Clear</button>
+                        </div>
+
+                        <details class="schema-details" id="schema-details">
+                            <summary>Output schema (optional)</summary>
+                            <p class="text-muted hint">A JSON Schema with <span class="font-jet">"type": "object"</span>.
+                                Every value comes back with a quote from the page, or is flagged unverified.</p>
+                            <div class="preset-row" role="group" aria-label="Schema presets">
+                                <button type="button" class="btn btn-sm btn-secondary" data-preset="products">Product list</button>
+                                <button type="button" class="btn btn-sm btn-secondary" data-preset="pricing">Pricing plans</button>
+                                <button type="button" class="btn btn-sm btn-secondary" data-preset="articles">Article list</button>
+                            </div>
+                            <textarea id="schema-input" class="schema-input font-jet" rows="10" spellcheck="false"
+                                      aria-describedby="schema-status" placeholder='{"type": "object", "properties": { ... }}'></textarea>
+                            <p id="schema-status" class="schema-status" aria-live="polite"></p>
+                        </details>
                     </div>
 
-                    <div class="dashboard-grid">
-                        <div class="grid-card wide" id="agent-terminal-card" style="display: none;">
-                            <div class="card-header">
-                                <h3>Agent Terminal Log</h3>
-                                <span class="badge badge-warning">Running...</span>
-                            </div>
-                            <div class="log-terminal" id="agent-log-stream">
-                                <!-- Logs will be injected here via JS -->
-                            </div>
+                    <div class="grid-card live-card" id="live-card" hidden>
+                        <div class="card-header">
+                            <h3 id="live-title">Job</h3>
+                            <span class="badge" id="live-status">queued</span>
                         </div>
-                        
-                        <div class="grid-card" id="quick-prompts">
-                            <div class="card-header">
-                                <h3>Quick Actions</h3>
-                            </div>
-                            <div class="api-endpoints-scroller">
-                                <div class="api-endpoint-item">
-                                    <span class="api-method method-get">WEB</span>
-                                    <span>Summarize the latest YC startups</span>
-                                </div>
-                                <div class="api-endpoint-item">
-                                    <span class="api-method method-post">ACT</span>
-                                    <span>Login to Github and scrape my repos</span>
-                                </div>
-                                <div class="api-endpoint-item">
-                                    <span class="api-method method-get">API</span>
-                                    <span>Discover endpoints on dev.to</span>
-                                </div>
-                            </div>
-                        </div>
+                        <dl class="counter-row" id="live-counters"></dl>
+                        <div class="log-terminal" id="agent-log-stream" role="log" aria-live="polite" aria-label="Job log"></div>
                     </div>
 
-                    <!-- Result output area (hidden initially) -->
-                    <div id="search-result-area" style="display: none; margin-top: 32px;">
-                        <h3 style="margin-bottom: 16px; font-weight: 900; font-size: 24px; text-transform: uppercase;">Extracted Insights</h3>
-                        <div class="search-result-item" style="border-color: var(--success); border-width: 4px;">
-                            <div class="res-header">
-                                <span class="res-title">Result: Stripe Pricing Plans</span>
-                                <!-- unimplemented: <button class="btn btn-sm btn-secondary">⭐ Save</button> -->
-                            </div>
-                            <p class="res-snippet font-jet">
-                                1. Integrated Plan: 2.9% + 30¢ per successful card charge.<br><br>
-                                2. Customized Plan: Tailored for businesses with large payments volume or unique business models.<br><br>
-                                - Extracted from: https://stripe.com/pricing
-                            </p>
-                            <div class="res-meta">Time taken: 4.2s | Tokens: 420 | Method: Deep Research</div>
+                    <section class="results-area" id="results-area" hidden aria-labelledby="results-title">
+                        <div class="results-head">
+                            <h3 id="results-title">Results</h3>
+                            <div class="export-row" id="results-exports"></div>
                         </div>
-                    </div>
-
+                        <p class="text-muted" id="results-summary"></p>
+                        <div class="results-tabs" id="results-tabs" role="tablist" aria-label="Result views">
+                            <button type="button" role="tab" class="sub-tab" data-result-tab="data" aria-selected="true" aria-controls="result-data" id="tab-data">Data</button>
+                            <button type="button" role="tab" class="sub-tab" data-result-tab="pages" aria-selected="false" aria-controls="result-pages" id="tab-pages" tabindex="-1">Pages</button>
+                            <button type="button" role="tab" class="sub-tab" data-result-tab="entities" aria-selected="false" aria-controls="result-entities" id="tab-entities" tabindex="-1">Entities</button>
+                            <button type="button" role="tab" class="sub-tab" data-result-tab="graph" aria-selected="false" aria-controls="result-graph" id="tab-graph" tabindex="-1">Graph</button>
+                            <button type="button" role="tab" class="sub-tab" data-result-tab="agent" aria-selected="false" aria-controls="result-agent" id="tab-agent" tabindex="-1" hidden>Agent steps</button>
+                        </div>
+                        <div class="result-panel" role="tabpanel" id="result-data" aria-labelledby="tab-data"></div>
+                        <div class="result-panel" role="tabpanel" id="result-pages" aria-labelledby="tab-pages" hidden></div>
+                        <div class="result-panel" role="tabpanel" id="result-entities" aria-labelledby="tab-entities" hidden></div>
+                        <div class="result-panel" role="tabpanel" id="result-graph" aria-labelledby="tab-graph" hidden></div>
+                        <div class="result-panel" role="tabpanel" id="result-agent" aria-labelledby="tab-agent" hidden></div>
+                    </section>
                 </section>
 
-                <!-- 2. Search History Tab -->
-                <section class="tab-panel" id="panel-history">
+                <!-- 2. Job history -->
+                <section class="tab-panel" id="panel-history" aria-labelledby="page-title">
                     <div class="panel-header">
-                        <h3>Recent Agent Tasks</h3>
-                        <!-- unimplemented: <button class="btn btn-danger">Clear History</button> -->
+                        <h3>Jobs on this server</h3>
+                        <button type="button" class="btn btn-secondary" id="refresh-history-btn">Refresh</button>
                     </div>
-                    <p class="text-muted">
-                        Illustrative rows. Job history is not persisted yet, so nothing
-                        below reflects a real run of this engine.
-                    </p>
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th>Query / Target</th>
-                                <th>Mode</th>
-                                <th>Time</th>
-                                <th>Status</th>
-                                <!-- unimplemented: <th>Action</th> -->
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr>
-                                <td><b>Extract pricing plans from Stripe</b></td>
-                                <td><span class="badge">Deep Research</span></td>
-                                <td>2 mins ago</td>
-                                <td><span class="badge badge-success">Completed</span></td>
-                                <td class="text-muted">-</td>
-                            </tr>
-                            <tr>
-                                <td><b>Summarize latest tech news on HackerNews</b></td>
-                                <td><span class="badge">Fast Scrape</span></td>
-                                <td>1 hour ago</td>
-                                <td><span class="badge badge-success">Completed</span></td>
-                                <td class="text-muted">-</td>
-                            </tr>
-                            <tr>
-                                <td><b>Find login button on example.com and click it</b></td>
-                                <td><span class="badge badge-accent">Visual Action</span></td>
-                                <td>3 hours ago</td>
-                                <td><span class="badge badge-warning">Blocked (Captcha)</span></td>
-                                <td class="text-muted">-</td>
-                            </tr>
-                        </tbody>
-                    </table>
+                    <div class="table-scroll">
+                        <table class="data-table">
+                            <thead>
+                                <tr><th scope="col">Target</th><th scope="col">Kind</th><th scope="col">Started</th>
+                                    <th scope="col">Status</th><th scope="col">Output</th><th scope="col"><span class="sr-only">Actions</span></th></tr>
+                            </thead>
+                            <tbody id="history-table-body"></tbody>
+                        </table>
+                    </div>
                 </section>
 
-                <!-- 3. Saved Insights Tab -->
-                <section class="tab-panel" id="panel-saved">
+                <!-- 3. Service health -->
+                <section class="tab-panel" id="panel-health" aria-labelledby="page-title">
                     <div class="panel-header">
-                        <h3>Saved Data & JSON Exports</h3>
-                        <!-- unimplemented: <button class="btn btn-primary">Export All (CSV)</button> -->
+                        <h3>Dependencies</h3>
+                        <button type="button" class="btn btn-secondary" id="refresh-health-btn">Refresh</button>
                     </div>
-                    <p class="text-muted">
-                        Illustrative rows. Nothing can be saved or exported yet.
-                    </p>
-
-                    <div class="search-results-list">
-                        <div class="search-result-item">
-                            <div class="res-header">
-                                <span class="res-title">YC Startup List (S24)</span>
-                                <span class="res-score">Saved: Yesterday</span>
-                            </div>
-                            <p class="res-snippet">A compiled list of 240 startups from the YC Summer 24 batch, including their domains, descriptions, and founder details.</p>
-                            <div style="display: flex; gap: 12px;">
-                                <!-- unimplemented: <button class="btn btn-sm btn-secondary">View JSON</button> -->
-                                <!-- unimplemented: <button class="btn btn-sm btn-danger">Delete</button> -->
-                            </div>
-                        </div>
+                    <p class="text-muted">Credentials stay in the server environment; only the provider and model name are shown.</p>
+                    <div class="table-scroll">
+                        <table class="data-table">
+                            <thead><tr><th scope="col">Component</th><th scope="col">Status</th><th scope="col">Detail</th></tr></thead>
+                            <tbody id="health-table-body"></tbody>
+                        </table>
                     </div>
                 </section>
 
-                <!-- 4. API Keys Tab: live engine + dependency health -->
-                <section class="tab-panel" id="panel-api-keys">
+                <!-- 4. API discovery -->
+                <section class="tab-panel" id="panel-api-discovery" aria-labelledby="page-title">
                     <div class="panel-header">
-                        <h3>Service Health &amp; Credentials</h3>
-                        <button class="btn btn-primary" id="refresh-health-btn">Refresh Status</button>
+                        <h3>Discovered REST endpoints</h3>
+                        <button type="button" class="btn btn-secondary" id="refresh-apis-btn">Refresh</button>
                     </div>
-                    <p class="text-muted">Credentials are read from the server environment and are never sent to the browser.</p>
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th>Component</th>
-                                <th>Status</th>
-                                <th>Detail</th>
-                            </tr>
-                        </thead>
-                        <tbody id="health-table-body">
-                            <tr>
-                                <td colspan="3" class="text-muted">Loading engine status...</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </section>
-
-                <!-- 5. API Discovery Tab: endpoints sniffed by the crawler -->
-                <section class="tab-panel" id="panel-api-discovery">
-                    <div class="panel-header">
-                        <h3>Discovered REST Endpoints</h3>
-                        <button class="btn btn-primary" id="refresh-apis-btn">Refresh</button>
+                    <p class="text-muted">Recorded from the XHR and fetch calls crawled pages make to their own backends, stored in PostgreSQL.</p>
+                    <div class="table-scroll">
+                        <table class="data-table">
+                            <thead><tr><th scope="col">Method</th><th scope="col">Path</th><th scope="col">Host</th><th scope="col">Content type</th><th scope="col">Seen</th></tr></thead>
+                            <tbody id="api-table-body"></tbody>
+                        </table>
                     </div>
-                    <p class="text-muted">
-                        Populated by the crawler's API Intelligence pass, which records the
-                        XHR and fetch calls a page makes to its own backend. Records are
-                        stored in PostgreSQL.
-                    </p>
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th>Method</th>
-                                <th>Path</th>
-                                <th>Host</th>
-                                <th>Content Type</th>
-                                <th>Seen</th>
-                            </tr>
-                        </thead>
-                        <tbody id="api-table-body">
-                            <tr>
-                                <td colspan="5" class="text-muted">Loading discovered endpoints...</td>
-                            </tr>
-                        </tbody>
-                    </table>
                 </section>
-
             </div>
         </main>
     </div>
 
-    <!-- UI Interaction Scripts -->
-    <script src="app.js"></script>
+    <div class="citation-popover" id="citation-popover" role="dialog" aria-modal="false" aria-labelledby="citation-title" hidden>
+        <p class="citation-title" id="citation-title">Source</p>
+        <div id="citation-body"></div>
+        <button type="button" class="btn btn-sm btn-secondary" id="citation-close">Close</button>
+    </div>
 
+    <script src="app.js"></script>
 </body>
 </html>

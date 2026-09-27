@@ -732,7 +732,7 @@ def page_summary(entry: Dict[str, Any]) -> Dict[str, Any]:
 def publish_new_errors(job: Any) -> None:
     """Publishes each job error once, in order."""
     for message in job.errors[job.errors_published:]:
-        job.events.publish("error", {"message": message})
+        job.events.publish("job_error", {"message": message})
     job.errors_published = len(job.errors)
 
 
@@ -1061,7 +1061,9 @@ def _event_response(job: Any, request: Request) -> StreamingResponse:
 async def crawl_events(job_id: str, request: Request) -> StreamingResponse:
     """Live progress of a crawl as server-sent events.
 
-    Events: ``snapshot``, ``status``, ``page``, ``error`` and a final ``done``.
+    Events: ``snapshot``, ``status``, ``page``, ``job_error`` and a final ``done``.
+    (Not ``error``: EventSource treats an event of that name as a connection
+    failure.)
     """
     job = app.state.jobs.get(job_id)
     if job is None:
@@ -1072,7 +1074,7 @@ async def crawl_events(job_id: str, request: Request) -> StreamingResponse:
 @app.get("/api/v1/act/{job_id}/events")
 async def agent_events(job_id: str, request: Request) -> StreamingResponse:
     """Live progress of an agent task: ``snapshot``, ``status``, ``step``,
-    ``error`` and a final ``done``."""
+    ``job_error`` and a final ``done``."""
     job = app.state.agent_jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Unknown agent job id: {job_id}")
@@ -1348,8 +1350,22 @@ app.add_api_route(
 )
 
 
+class RevalidatedStaticFiles(StaticFiles):
+    """Static files the browser must revalidate on every load.
+
+    Without this, browsers heuristically cache app.js and style.css, and a
+    console opened after an update runs stale code against a new API. The
+    ETag still makes unchanged files a cheap 304.
+    """
+
+    async def get_response(self, path: str, scope: Any) -> Response:
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 if DASHBOARD_DIR.is_dir():
-    app.mount("/dashboard", StaticFiles(directory=str(DASHBOARD_DIR), html=True), name="dashboard")
+    app.mount("/dashboard", RevalidatedStaticFiles(directory=str(DASHBOARD_DIR), html=True), name="dashboard")
     logger.info("Dashboard mounted at /dashboard (from %s)", DASHBOARD_DIR)
 
     @app.get("/", include_in_schema=False)

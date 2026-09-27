@@ -419,6 +419,11 @@ class TestDashboardAndDocs:
         assert client.get("/dashboard/app.js").status_code == 200
         assert client.get("/dashboard/style.css").status_code == 200
 
+    def test_dashboard_assets_are_revalidated(self, client):
+        """Heuristic caching left browsers running a stale console after updates."""
+        for asset in ("app.js", "style.css", "index.html"):
+            assert client.get(f"/dashboard/{asset}").headers["cache-control"] == "no-cache"
+
     def test_root_redirects_to_dashboard(self, client):
         response = client.get("/", follow_redirects=False)
         assert response.status_code in (302, 307)
@@ -473,25 +478,45 @@ class TestDashboardAndDocs:
         assert pending < awaited, "the pending state must be set before the await"
 
     def test_every_live_button_has_a_handler(self):
-        """Eight decorative buttons shipped in the original layout."""
+        """Eight decorative buttons once shipped in the original layout.
+
+        Every <button> must be wired: by an id app.js looks up, or by a
+        data-* hook app.js queries (nav tabs, presets, result tabs).
+        """
         import re
 
         live, js = self._dashboard()
-        labels = [
-            re.sub(r"\s+", " ", m).strip()
-            for m in re.findall(r"<button[^>]*>(.*?)</button>", live, re.S)
-        ]
-        assert labels, "expected the dashboard to keep its working buttons"
-        # Each live button is reachable either by an inline handler that
-        # setupSearch rewires, or by an addEventListener in app.js.
-        wired = ("startSearch", "clearSearch", "setupHealthIndicator",
-                 "loadDiscoveredApis")
-        for handler in wired:
-            assert handler in js, f"{handler} is missing from app.js"
-        for label in labels:
-            assert not re.search(r"\b(Export|Delete|Save|History)\b", label), (
-                f"unimplemented control is still visible: {label!r}"
+        buttons = re.findall(r"<button([^>]*)>(.*?)</button>", live, re.S)
+        assert buttons, "expected the dashboard to keep its working buttons"
+        for attrs, label in buttons:
+            button_id = re.search(r'id="([^"]+)"', attrs)
+            hooks = re.findall(r"(data-[a-z-]+)=", attrs)
+            wired = (button_id and f'getElementById("{button_id.group(1)}")' in js) or any(
+                f"[{hook}" in js for hook in hooks
             )
+            assert wired, f"button {label.strip()!r} has no handler in app.js"
+        for handler in ("startSearch", "clearSearch", "setupHealthIndicator", "loadDiscoveredApis"):
+            assert handler in js, f"{handler} is missing from app.js"
+
+    def test_dashboard_shows_no_invented_data(self):
+        """A previous revision drew a 'knowledge graph' from string literals."""
+        live, js = self._dashboard()
+        for fake in ("Example Corp", "Demo User", "BYCONN-X AI", "Stripe Pricing",
+                     "Illustrative", "Configured ✅"):
+            assert fake not in js and fake not in live, fake
+        assert "alert(" not in js
+
+    def test_untrusted_text_is_never_parsed_as_html(self):
+        _, js = self._dashboard()
+        assert "innerHTML" not in js and "insertAdjacentHTML" not in js
+        assert "onclick=" not in js
+
+    def test_scripts_are_local(self):
+        """No unpinned CDN script: the demo must work offline and not drift."""
+        import re
+
+        live, _ = self._dashboard()
+        assert re.findall(r'<script[^>]*src="([^"]+)"', live) == ["app.js"]
 
     def test_visual_action_mode_calls_the_agent_endpoint(self):
         """It used to only lower max_depth, so /act was unreachable from the UI."""
@@ -678,7 +703,7 @@ class TestEventStream:
         client.app.state.extractor.delay = 0.3
         job_id = _start(client, max_depth=0)["job_id"]
         events = _read_events(client, f"/api/v1/crawl/{job_id}/events")
-        messages = [data["message"] for name, data in events if name == "error"]
+        messages = [data["message"] for name, data in events if name == "job_error"]
         assert messages and len(messages) == len(set(messages))
 
     def test_unknown_job_is_404(self, client):
@@ -785,6 +810,14 @@ class TestHealthDetail:
         body = client.get("/api/v1/health").json()
         assert body["llm"]["detail"] == "openai · fake-model"
         assert "sk-" not in json.dumps(body) and "gsk_" not in json.dumps(body)
+
+
+def test_no_sse_event_is_named_error():
+    """EventSource delivers an event named "error" to onerror as well, so the
+    dashboard took the first job warning for a dropped connection."""
+    import inspect
+
+    assert 'publish("error"' not in inspect.getsource(server_module)
 
 
 def test_rerunning_a_crawl_is_not_deduplicated_against_the_first(client):
