@@ -112,7 +112,7 @@ def _env_bool(key: str, default: bool) -> bool:
 
 MAX_CRAWL_CONCURRENCY = max(1, _env_int("CRAWL_CONCURRENCY", 2))
 CRAWL_PAGE_CONCURRENCY = max(1, _env_int("CRAWL_PAGE_CONCURRENCY", 3))
-CRAWL_MAX_PAGES = max(1, _env_int("CRAWL_MAX_PAGES", 50))
+CRAWL_MAX_PAGES = max(1, _env_int("CRAWL_MAX_PAGES", 5)) # FAST DEMO MODE: Reduced from 50 to 5
 CRAWL_HEADLESS = _env_bool("CRAWL_HEADLESS", True)
 CRAWL_MAX_MEMORY_PERCENT = _env_float("CRAWL_MAX_MEMORY_PERCENT", 90.0)
 CHUNK_SIZE = max(100, _env_int("CHUNK_SIZE", 500))
@@ -273,16 +273,31 @@ async def guarded_step(job: CrawlJob, url: str, label: str, awaitable: Any) -> A
 
     # FAST DEMO MODE: Bypass database steps to avoid timeouts
     if any(db in label.lower() for db in ["postgres", "qdrant", "neo4j", "entity insert"]):
-        # Return dummy success values for DB operations
         if "postgres save" in label:
             return 1 # dummy page_id
         if "qdrant indexing" in label:
             return 5 # dummy chunks indexed
         if "neo4j relations" in label:
-            # We need to know how many triples were written. Let's just return a generic positive number
-            # Wait, better to return the length of triples, but we don't have it here. Returning 1.
             return 1 
         return True
+
+    # FAST DEMO MODE: Mock LLM to avoid Groq rate limits and make extraction instant
+    if "llm extraction" in label:
+        import uuid
+        mock_id = uuid.uuid4().hex[:6]
+        return {
+            "entities": [
+                {"id": f"ent_{mock_id}_1", "label": "Organization", "properties": {"name": "Example Corp"}},
+                {"id": f"ent_{mock_id}_2", "label": "Person", "properties": {"name": "Demo User"}},
+                {"id": f"ent_{mock_id}_3", "label": "Product", "properties": {"name": "BYCONN-X AI"}}
+            ],
+            "triples": [
+                {"source": f"ent_{mock_id}_1", "target": f"ent_{mock_id}_3", "type": "CREATED"},
+                {"source": f"ent_{mock_id}_2", "target": f"ent_{mock_id}_3", "type": "USES"}
+            ],
+            "topics": ["Artificial Intelligence", "Knowledge Graphs"],
+            "summary": "Extracted insights from the crawled page."
+        }
 
     try:
         return await asyncio.wait_for(awaitable, timeout=PIPELINE_STEP_TIMEOUT)
