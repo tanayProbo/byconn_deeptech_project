@@ -1,25 +1,90 @@
-# BYCONN-X: Universal AI-Powered Data Acquisition
+# BYCONN-X: schema-shaped web data, with a source for every value
 
-**BYCONN-X** is an AI-native data acquisition engine for crawling, scraping and
-understanding the web at scale. It combines a distributed Playwright crawler
-with real LLM-powered entity extraction and a knowledge-graph store.
+[![CI](https://github.com/tanayProbo/byconn_deeptech_project/actions/workflows/ci.yml/badge.svg)](https://github.com/tanayProbo/byconn_deeptech_project/actions/workflows/ci.yml)
 
-## Features
+**BYCONN-X** crawls a site with Playwright and returns exactly the data you ask
+for, in the JSON Schema you give it. Every extracted value carries a quote from
+the page, and **the quote is checked against the page in code**. A value the
+model cannot back up is flagged as *unverified* rather than passed off as fact.
+Along the way it stores pages in PostgreSQL, embeds them into Qdrant, builds a
+knowledge graph in Neo4j, and records the site's own API calls as an OpenAPI
+spec.
 
-- **Distributed Crawling** — concurrent Playwright workers with fingerprint
-  spoofing, proxy rotation, memory-aware throttling and item-locked retries.
-- **AI Extraction** — `LLMExtractor` turns cleaned page text into typed
-  entities and relation triples via OpenAI or Gemini, with tiktoken budgeting
-  and retry/backoff.
-- **Semantic Vectors** — real 384-dim embeddings (OpenAI
-  `text-embedding-3-small` or local `sentence-transformers`) indexed in Qdrant.
-- **Knowledge Graph** — entities and relations merged into Neo4j with
-  allowlisted labels and fully parameterised Cypher.
-- **Structured Storage** — raw pages and extracted entities persisted in
-  PostgreSQL with schema auto-creation.
-- **REST API** — FastAPI service with a background crawl pipeline, job tracking
-  and a health endpoint.
-- **Operator Dashboard** — a neobrutalist search console served by the API.
+The shape of a result (`GET /api/v1/crawl/{id}/results`, abridged):
+
+```text
+structured.data.products[0]            {"name": "A Light in the ...", "price": "£51.77"}
+structured.citations["/products/0/price"]  [{"quote": "£51.77", "url": "https://books.toscrape.com/..."}]
+structured.unverified                  ["/products/7/name"]   ← no quote on the page supports this value
+```
+
+## What is built, and what is not
+
+This table is kept honest on purpose: every "Implemented" row links to the code
+that does it, and every claim can be checked with `pytest`.
+
+| Capability | Status | Where |
+| --- | --- | --- |
+| Playwright crawling: concurrent workers, memory-aware throttling, retries, bounded navigation and per-page time limits | Implemented | [`core/crawler.py`](byconn/core/crawler.py), [`core/request_queue.py`](byconn/core/request_queue.py) |
+| Same-host frontier, `robots.txt` for the seed and every discovered link, page cap | Implemented | [`core/link_discovery.py`](byconn/core/link_discovery.py), [`server.py`](server.py) |
+| HTML → Markdown cleaning with per-job near-duplicate suppression | Implemented | [`pipeline/cleaning.py`](byconn/pipeline/cleaning.py) |
+| **Schema-driven extraction with verified citations**, retry on schema errors, windowing for long pages | Implemented | [`pipeline/structured.py`](byconn/pipeline/structured.py), [`pipeline/llm_extractor.py`](byconn/pipeline/llm_extractor.py) |
+| Entity and relation extraction (any OpenAI-compatible model, Groq, Gemini, local Ollama), content-hash cache, concurrency cap | Implemented | [`pipeline/llm_extractor.py`](byconn/pipeline/llm_extractor.py) |
+| Embeddings (local sentence-transformers or OpenAI) indexed in Qdrant | Implemented | [`pipeline/embedder.py`](byconn/pipeline/embedder.py), [`storage/adapters.py`](byconn/storage/adapters.py) |
+| PostgreSQL pages, entities and per-page results; Neo4j knowledge graph | Implemented | [`storage/adapters.py`](byconn/storage/adapters.py) |
+| API sniffing of XHR/fetch traffic → OpenAPI spec | Implemented | [`api_intelligence/`](byconn/api_intelligence) |
+| REST API with live progress over server-sent events, results, history and JSON/JSONL/CSV export | Implemented | [`server.py`](server.py) |
+| Operator console: live job log, cited data tables, entities, graph, exports | Implemented | [`dashboard/`](byconn/dashboard) |
+| Visual browser agent (plans over the page's interactive elements, plus a screenshot for vision models) | Implemented | [`visual_agent/`](byconn/visual_agent) |
+| Extraction eval: 20 fixtures with gold answers, field-level P/R/F1 | Implemented | [`eval/`](byconn/eval) |
+| Browser fingerprinting | Partial: rotated user agents and `navigator.webdriver` hidden | [`core/browser_pool.py`](byconn/core/browser_pool.py) |
+| Proxy rotation and session scoring | Partial: `BrowserPool` accepts a proxy list and `SessionPool` exists, but the server wires neither in | [`core/browser_pool.py`](byconn/core/browser_pool.py), [`core/session_pool.py`](byconn/core/session_pool.py) |
+| Android automation | Partial: ADB commands and the accessibility inspector work; the scrcpy frame decoder is a stub; not exposed by the API | [`mobile/`](byconn/mobile) |
+| Public API catalogue (18 APIs), connector generator, health monitor | Library only; not exposed by the API | [`free_api_integration/`](byconn/free_api_integration) |
+| Terraform (GKE) | Partial: a skeleton, not exercised in CI | [`deployment/terraform/`](byconn/deployment/terraform) |
+| Helm chart | Planned: `Chart.yaml` and `values.yaml` only, no templates yet | [`deployment/helm/`](byconn/deployment/helm) |
+| Distributed crawling across machines, per-domain rate limiting, PII redaction, Kafka, Ray, ClickHouse, Vault | Planned; not in the code | [`docs/blueprint.md`](byconn/docs/blueprint.md) describes the target design |
+
+## Architecture
+
+```mermaid
+flowchart LR
+    API["POST /api/v1/crawl<br/>url · prompt · schema"] --> Q["RequestQueue<br/>same host · robots.txt · page cap"]
+    Q --> W["Playwright workers<br/>BrowserPool"]
+    W -. "XHR / fetch" .-> SN["ProxySniffer → OpenAPI spec"]
+    W --> C["DataCleaner<br/>HTML → Markdown · per-job dedup"]
+    C --> PG1["PostgreSQL<br/>raw page"]
+    C --> V["Embedder → Qdrant"]
+    C --> K["LLM: entities + relations"]
+    C --> SX["LLM: schema data + quotes<br/>quotes verified against the page"]
+    K --> PG2["PostgreSQL<br/>entities"]
+    K --> N["Neo4j graph"]
+    SX --> R["Per-page results<br/>merged into the job"]
+    K --> R
+    R --> PG3["PostgreSQL<br/>extraction_results"]
+    R --> SSE["SSE /events"] --> UI["Dashboard"]
+```
+
+**Design decisions**
+
+- **Quotes are verified, not trusted.** A model asked for citations will
+  happily invent them. [`verify_citations`](byconn/pipeline/structured.py)
+  keeps a quote only if it occurs in the page text after normalising case,
+  whitespace, typography and Markdown markup. Everything else is reported in
+  `unverified` and flagged in the UI and exports.
+- **Independent steps run concurrently.** Per page, the PostgreSQL save,
+  embedding + Qdrant indexing, knowledge extraction and schema extraction run
+  together, so a page costs its slowest step, not the sum. The graph and
+  entity writes form a second concurrent phase.
+- **Content-hash LLM cache.** Identical text sent to the same model gives the
+  same answer, so it is not sent twice (`LLM_CACHE_SIZE`). Failures are never
+  cached. Provider calls are capped (`LLM_MAX_CONCURRENCY`) to stay inside
+  free-tier rate limits.
+- **Degrade, never lie.** Any store can be down: the crawl still finishes,
+  results stay available from memory, the shortfall is listed in the job's
+  `errors`, and `/api/v1/health` answers `503 degraded`. Counters only count
+  what a store accepted. Unreachable stores fail fast instead of stalling each
+  page.
 
 ## Quickstart & Demo
 
@@ -129,11 +194,17 @@ Either through the API:
 ```bash
 curl -X POST http://localhost:8000/api/v1/crawl \
   -H "Content-Type: application/json" \
-  -d '{"url": "https://books.toscrape.com/", "max_depth": 1}'
+  -d '{"url": "https://books.toscrape.com/", "max_depth": 1,
+       "prompt": "extract every book title and price",
+       "schema": {"type": "object", "properties": {"products": {"type": "array",
+                  "items": {"type": "object", "properties": {
+                     "name": {"type": "string"}, "price": {"type": "string"}}}}}}}'
 
-# -> {"job_id":"6f2a...","status":"queued",...}
+# -> {"job_id":"6f2a...","status":"queued","has_schema":true,...}
 
-curl http://localhost:8000/api/v1/crawl/<job_id>
+curl -N http://localhost:8000/api/v1/crawl/<job_id>/events    # live progress (SSE)
+curl http://localhost:8000/api/v1/crawl/<job_id>/results       # data, citations, graph
+curl -OJ "http://localhost:8000/api/v1/crawl/<job_id>/export?format=csv"
 ```
 
 Or from the CLI:
@@ -168,43 +239,22 @@ byconn crawl https://books.toscrape.com/ --depth 1 --concurrency 2
 
 <http://localhost:8000/dashboard>
 
-The operator console is served by the same process — enter a target URL, watch
-the agent terminal stream progress, and inspect engine health on the **API
-Keys** tab. There is nothing extra to run.
+The operator console is served by the same process. Type a URL with an
+instruction, optionally pick an output schema preset, and launch. The job card
+streams progress live; the results show the data table (each value has a
+**source** marker that opens its verified quote), pages, entities, the graph
+and download links. **Job History** survives a page refresh. There is nothing
+extra to run.
 
 ### Recording a demo
 
-Three terminals, in this order:
-
-```bash
-# Terminal 1 — the datastores
-docker compose up -d
-docker compose ps        # all three should say "running"
-```
-
-```bash
-# Terminal 2 — the local model server
-ollama serve             # with llama3.2 and llava pulled
-```
-
-```bash
-# Terminal 3 — the service and dashboard
-byconn-server
-```
-
-Then browse to <http://localhost:8000/dashboard> and record:
-
-1. The header reads `ENGINE: OK | postgres:up qdrant:up neo4j:up`.
-2. Type a target — a bare domain is enough, e.g. `stripe.com/pricing` — pick a
-   mode, and press **Launch Agent**. **Fast Scrape** and **Deep Research** crawl;
-   **Visual Action** drives the browser agent.
-3. The terminal streams live counters, then renders the result.
-4. The **API Discovery** tab lists the endpoints the sniffer caught in the
-   target's own XHR traffic.
+`scripts/demo_up.sh` starts the datastores and the server and waits until
+every dependency reports up. The 90-second shot list is in
+[`docs/demo.md`](byconn/docs/demo.md).
 
 The search box accepts a bare domain, a full URL, or an instruction with a URL
-in it (`extract pricing from stripe.com`); the prose is passed to the agent as
-the task.
+in it (`extract pricing from stripe.com`); the prose becomes the extraction
+instruction (or the agent's task in **Visual Action** mode).
 
 **Keeping it fast without faking it.** Every step really runs; speed comes
 from doing less redundant work:
@@ -234,8 +284,9 @@ job's `errors` array.
 ### What just happened
 
 For every page the pipeline crawls, cleans to Markdown, deduplicates against
-earlier pages, embeds and indexes in Qdrant, extracts typed entities and
-relations with the LLM, and merges them into Neo4j — while the sniffer records
+earlier pages of the same job, embeds and indexes in Qdrant, extracts typed
+entities and relations (and, when asked, schema-shaped data with verified
+quotes) with the LLM, and merges the relations into Neo4j — while the sniffer records
 the site's own XHR traffic and writes an OpenAPI spec to `byconn_output/`.
 
 ### Troubleshooting
@@ -305,6 +356,15 @@ boots with no configuration at all.
 | `EMBEDDING_DIMENSIONS` | `384` | Must match your Qdrant collection |
 | `CRAWL_CONCURRENCY` | `2` | Simultaneous crawls |
 | `CRAWL_MAX_PAGES` | `50` | Hard page cap per crawl |
+| `CHUNK_SIZE` | `180` | Words per embedding chunk; keep under ~190 for MiniLM's 256-token window |
+| `PAGE_HANDLER_TIMEOUT` | `180` | Seconds before one page's processing is abandoned (not retried) |
+| `LLM_CACHE_SIZE` | `256` | Extraction results cached by content hash; `0` disables |
+| `LLM_MAX_CONCURRENCY` | `4` | Parallel provider calls; lower it on strict free tiers |
+| `LLM_MAX_WINDOWS` | `4` | Windows of a long page sent for schema extraction |
+| `LLM_MAX_INPUT_TOKENS` | `6000` | Tokens of page text per model call (per window) |
+| `NEO4J_MAX_RETRY_TIME` | `5` | Seconds the Neo4j driver retries a failed transaction |
+| `SSE_HEARTBEAT_SECONDS` | `15` | Heartbeat interval on idle event streams |
+| `GRAPH_NODE_CAP` | `300` | Largest knowledge graph returned to the dashboard |
 | `HOST` / `PORT` | `0.0.0.0` / `8000` | API bind address |
 
 Without an embedding provider the pipeline still crawls, cleans, extracts and
@@ -330,10 +390,17 @@ A console script is also installed: `byconn-server` (host/port via `HOST` and
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | `/api/v1/crawl` | Queue a crawl. Body: `{"url": str, "max_depth": int}`. Returns `202` with a `job_id`. |
+| `POST` | `/api/v1/crawl` | Queue a crawl. Body: `url`, `max_depth` (0–5), optional `prompt` and `schema` (JSON Schema, `"type": "object"`). Returns `202` with a `job_id`. |
 | `GET` | `/api/v1/crawl/{job_id}` | Job status and counters. |
-| `GET` | `/api/v1/health` | Per-dependency status. `200` healthy, `503` degraded. |
-| `GET` | `/dashboard/` | Static operator console. |
+| `GET` | `/api/v1/crawl/{job_id}/events` | Live progress as server-sent events: `snapshot`, `status`, `page`, `job_error`, `done`. |
+| `GET` | `/api/v1/crawl/{job_id}/results` | Per-page results, merged structured data with citations and unverified pointers, and the knowledge graph. |
+| `GET` | `/api/v1/crawl/{job_id}/export?format=json\|jsonl\|csv` | Download. CSV flattens the structured array of objects and adds a `sources` column. |
+| `POST` | `/api/v1/act` | Queue a visual-agent task: `url`, `task`, `max_steps`. |
+| `GET` | `/api/v1/act/{job_id}` and `/events` | Agent status with its step trace; live steps over SSE. |
+| `GET` | `/api/v1/jobs` | Recent crawl and agent jobs, newest first. |
+| `GET` | `/api/v1/apis` | Endpoints discovered by the API sniffer (from PostgreSQL). |
+| `GET` | `/api/v1/health` | Per-dependency status plus the LLM provider and model. `200` healthy, `503` degraded. |
+| `GET` | `/dashboard/` | Operator console. |
 
 ## Library usage
 
@@ -428,6 +495,73 @@ Discovery stays on the seed host, honours `robots.txt`, and stops at
 `CRAWL_MAX_PAGES` (default 50). Set `CRAWL_DEDUPLICATE=false` to disable
 near-duplicate suppression, or `CRAWL_FOLLOW_LINKS=false` for a single page.
 
+## Evaluation
+
+`python -m byconn.eval` runs the real cleaning and structured-extraction path
+over 20 fixtures and scores the output against gold answers:
+
+- 6 book catalogue pages and 6 quotation pages from the Zyte scraping sandboxes
+  (books.toscrape.com, quotes.toscrape.com);
+- 8 hand-written pages with traps: a struck-through old price, filled jobs, past
+  events, a customer quote on a team page, a "was" price column.
+
+Gold contains only what is visible in the text the model receives, and a test
+enforces that for every value. Scoring is field-level: a value is right when it
+matches after normalisation (numbers must agree numerically), an invented
+record costs precision, and a missed one costs recall. Details:
+[`eval/scoring.py`](byconn/eval/scoring.py) and
+[`eval/fixtures/README.md`](byconn/eval/fixtures/README.md).
+
+```bash
+GROQ_API_KEY=... python -m byconn.eval --model llama-3.1-8b-instant
+OPENAI_API_KEY=ollama python -m byconn.eval --model llama3.2     # local
+```
+
+Each run writes `byconn/eval/results/<date>-<model>.json` and `.md`. With no
+model configured the command exits without writing anything, so every number
+below comes from a real run.
+
+### Results
+
+| Model | Where | Field P | Field R | Field F1 | Values with a verified quote | Schema-valid | Latency p50 / p95 | Run |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `llava` 7B | local (Ollama), 1800-token windows | 75.5% | 63.4% | 69.0% | 88.7% | 80% | 21s / 58s | [2026-09-27](byconn/eval/results/2026-09-27-llava.md) |
+
+This is a deliberately modest baseline: a small, general vision model on a
+laptop, with no tuning. It gives useful lessons:
+
+- **The citation check catches invention.** On `books-history` the model
+  invented 16 records, and 16 values came back flagged unverified. Across all
+  fixtures, 35 invented records cost precision, and the
+  UI and exports mark their values instead of presenting them as facts.
+- **Format failures dominate the misses.** Three fixtures got no parseable JSON
+  at all (F1 0), so the gap to a stronger model is mostly reliability, not
+  reading ability. The 17 fixtures it did parse averaged 0.83 F1.
+- **Traps work.** The struck-through price, "was" column and past-events
+  fixtures (`synthetic-pricing`, `synthetic-laptops`, `synthetic-events`) are
+  where a careless reader loses points.
+
+Add a row by running the eval with another model. Numbers are only ever copied
+from a results file.
+
+
+## Responsible use
+
+What is enforced today: `robots.txt` for the seed URL and every discovered
+link, a same-host frontier, a hard page cap per crawl, bounded navigation and
+processing time, and a descriptive user agent for `robots.txt` checks.
+
+What is **not** enforced yet: per-domain rate limiting (concurrency is capped,
+but requests are not spaced per host) and PII redaction. Crawl only sites you
+are allowed to, and keep `CRAWL_PAGE_CONCURRENCY` low for small sites.
+
+## Security
+
+Keys are read from the environment only and never reach the dashboard. CI scans
+every push for committed secrets. See [SECURITY.md](SECURITY.md), including a
+known key exposure in this repository's history that must be revoked at the
+provider.
+
 ## Tests
 
 ```bash
@@ -436,7 +570,7 @@ pytest
 
 The suite is hermetic: PostgreSQL, Qdrant, Neo4j, the browser and the LLM are
 all replaced with test doubles, and no network access or running services are
-required.
+required. CI runs it on Python 3.10, 3.11 and 3.12.
 
 ## Project layout
 
@@ -445,15 +579,19 @@ server.py                        FastAPI application and background pipeline
 conftest.py                      pytest sys.path bootstrap
 byconn/
   core/                          crawler, request queue, browser/session pools
-  pipeline/                      cleaning, chunking, embedding, LLM extraction
+  pipeline/                      cleaning, chunking, embedding, LLM extraction,
+                                 schema extraction with citation checks
   storage/adapters.py            async PostgreSQL, Qdrant and Neo4j adapters
   api_intelligence/              network interception and OpenAPI generation
   free_api_integration/          public API registry and connector generation
-  mobile/                        ADB and scrcpy device automation
+  mobile/                        ADB automation (frame decoding is a stub)
   visual_agent/                  DOM-driven browser agent
-  dashboard/                     static operator console
-  deployment/                    Helm and Terraform configuration
-  docs/blueprint.md              system design document
+  dashboard/                     operator console (no build step, no CDN scripts)
+  eval/                          extraction eval: fixtures, scorer, runner
+  deployment/                    Terraform skeleton; Helm chart metadata only
+  docs/blueprint.md              target system design (includes planned parts)
+  docs/demo.md                   90-second demo shot list
+scripts/demo_up.sh               start datastores + server, wait for health
   tests/                         pytest suite
 ```
 
