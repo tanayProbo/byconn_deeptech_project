@@ -318,6 +318,9 @@ class CrawlJob:
     events: EventHub = field(default_factory=EventHub, repr=False)
     errors_published: int = 0
     kind: str = "crawl"
+    # Per job: near-duplicate detection is stateful, and a cleaner shared
+    # across jobs made a re-run of any crawl skip every page as "seen".
+    cleaner: DataCleaner = field(default_factory=DataCleaner, repr=False)
 
     @property
     def wants_structured(self) -> bool:
@@ -432,7 +435,7 @@ async def process_page(
         # content closely matches an earlier one is not stored, embedded or
         # sent to the LLM again.
         try:
-            markdown = app.state.cleaner.html_to_unique_markdown(html)
+            markdown = job.cleaner.html_to_unique_markdown(html)
         except Exception as exc:
             job.errors.append(f"{url}: cleaning failed ({exc})")
             logger.exception("cleaning failed for %s", url)
@@ -444,7 +447,7 @@ async def process_page(
         try:
             # Required cleaning step: html_to_markdown strips scripts, styles
             # and layout boilerplate as part of its own pass.
-            markdown = app.state.cleaner.html_to_markdown(html)
+            markdown = job.cleaner.html_to_markdown(html)
         except Exception as exc:
             job.errors.append(f"{url}: cleaning failed ({exc})")
             logger.exception("cleaning failed for %s", url)
@@ -750,7 +753,6 @@ async def lifespan(application: FastAPI):
     Connection failures are logged rather than raised, so the service still
     starts and /api/v1/health can report exactly which dependency is down.
     """
-    application.state.cleaner = DataCleaner()
     application.state.embedder = DocumentEmbedder(embedding_client=None, chunk_size=CHUNK_SIZE)
     application.state.extractor = LLMExtractor()
     application.state.postgres = PostgresAdapter()

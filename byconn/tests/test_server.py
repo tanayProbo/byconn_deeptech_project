@@ -785,3 +785,13 @@ class TestHealthDetail:
         body = client.get("/api/v1/health").json()
         assert body["llm"]["detail"] == "openai · fake-model"
         assert "sk-" not in json.dumps(body) and "gsk_" not in json.dumps(body)
+
+
+def test_rerunning_a_crawl_is_not_deduplicated_against_the_first(client):
+    """Dedup state was shared by every job, so a second crawl of the same site
+    skipped every page as a duplicate and returned nothing."""
+    first = poll_job(client, start_crawl(client, "https://example.com/", 0))
+    second = poll_job(client, start_crawl(client, "https://example.com/", 0))
+    assert first["duplicates_skipped"] == 0
+    assert second["duplicates_skipped"] == 0
+    assert second["entities_extracted"] == first["entities_extracted"] > 0
