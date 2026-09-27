@@ -217,8 +217,10 @@ def verify_citations(
         kept = []
         for quote in offered.get(pointer, []):
             needle = normalize_text(quote)
-            if needle and needle in haystack and quote not in {k["quote"] for k in kept}:
-                kept.append({"quote": quote, "url": url})
+            # Shown to people: the page's words, not "[title](catalogue/...)".
+            readable = re.sub(r"\s+", " ", _MARKDOWN_LINK.sub(r"\1", quote)).strip()
+            if needle and needle in haystack and readable not in {k["quote"] for k in kept}:
+                kept.append({"quote": readable, "url": url})
         if not kept:
             as_text = str(value).strip()
             needle = normalize_text(as_text)

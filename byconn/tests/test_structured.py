@@ -74,6 +74,13 @@ class TestVerifyCitations:
         assert verified["/plans/0/price"][0]["url"] == "https://x.test"
         assert "/plans/0/price" not in unverified
 
+    def test_quote_is_stored_as_readable_text(self):
+        """Models often copy the Markdown line, link target and all."""
+        data = {"plans": [{"name": "Pro"}]}
+        cites = {"/plans/0/name": ["The [Pro plan](https://x.test/pro) costs $49"]}
+        verified, _ = structured.verify_citations(data, cites, PAGE, "u")
+        assert verified["/plans/0/name"][0]["quote"] == "The Pro plan costs $49"
+
     def test_fabricated_quote_is_dropped_and_value_flagged(self):
         data = {"plans": [{"name": "Enterprise", "price": "$999"}]}
         cites = {
