@@ -488,6 +488,29 @@ class TestServerApiIntelligence:
         spec = json.loads(spec_file.read_text())
         assert "/api/v1/items" in spec["paths"]
 
+    def test_third_party_calls_are_not_the_sites_api(self, client, tmp_path):
+        """Analytics and error trackers were listed as the site's endpoints."""
+        client.app.state.output_dir = str(tmp_path)
+        sniffer = ProxySniffer()
+        for url in ("https://api.x.test/v1/items", "https://x.test/api/quotes",
+                    "https://www.google-analytics.com/j/collect",
+                    "https://o1.ingest.sentry.io/api/1/envelope/"):
+            sniffer.handle_request({"url": url, "method": "POST"})
+            sniffer.handle_response(url, {"content_type": "application/json", "status": 200, "body": "{}"})
+        job = server_module.CrawlJob(job_id="fp", url="https://www.x.test/page", max_depth=0)
+        run_async(server_module.publish_discovered_apis(job, sniffer))
+        hosts = sorted(e["host"] for e in client.app.state.postgres.discovered)
+        assert hosts == ["api.x.test", "x.test"]
+        assert job.endpoints_discovered == 2
+
+    @pytest.mark.parametrize("host, site, expected", [
+        ("x.test", "https://x.test/", True), ("www.x.test", "https://x.test", True),
+        ("api.x.test:8443", "https://www.x.test/a", True), ("evilx.test", "https://x.test", False),
+        ("x.test.evil.com", "https://x.test", False), ("x.test", "", False),
+    ])
+    def test_is_first_party(self, host, site, expected):
+        assert server_module.is_first_party(host, site) is expected
+
 
 # ==========================================================================
 # visual agent
@@ -582,7 +605,46 @@ class TestLLMPlanner:
             planner.extractor, "_call_with_retries",
             lambda prompt, image=None, model=None: _async_return(None),
         )
-        assert run_async(planner.plan("goal", NODES, ""))["type"] == "stop"
+        action = run_async(planner.plan("goal", NODES, ""))
+        assert action["type"] == "stop" and action["error"] == "LLM call failed"
+
+    def test_failed_vision_call_falls_back_to_dom_planning(self, monkeypatch):
+        """A text-only model rejects screenshots; the agent must keep working."""
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        planner = LLMPlanner()
+        calls = []
+
+        def fake_call(prompt, image=None, model=None):
+            calls.append(image)
+            return _async_return(None if image else '{"type": "click", "id": 1}')
+
+        monkeypatch.setattr(planner.extractor, "_call_with_retries", fake_call)
+        first = run_async(planner.plan("goal", NODES, "", screenshot=b"png"))
+        assert first["type"] == "click" and calls == [b"png", None]
+        assert planner.vision_disabled is True
+        run_async(planner.plan("goal", NODES, "", screenshot=b"png"))
+        assert calls[2] is None  # no more screenshots once vision failed
+
+    def test_wrapped_action_is_unwrapped(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        planner = LLMPlanner()
+        monkeypatch.setattr(
+            planner.extractor, "_call_with_retries",
+            lambda prompt, image=None, model=None: _async_return(
+                '{"action": {"type": "click", "id": 1}}'
+            ),
+        )
+        action = run_async(planner.plan("goal", NODES, ""))
+        assert action["type"] == "click" and action["element_id"] == 1
+
+    def test_unusable_reply_is_an_error_stop(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        planner = LLMPlanner()
+        monkeypatch.setattr(
+            planner.extractor, "_call_with_retries",
+            lambda prompt, image=None, model=None: _async_return("I cannot help"),
+        )
+        assert run_async(planner.plan("goal", NODES, "")).get("error")
 
 
 async def _async_return(value):
@@ -795,6 +857,79 @@ class TestVisualBrowserAgent:
         page = page or _StubPage()
         return VisualBrowserAgent(page, planner=planner, step_delay=0)
 
+    def test_planner_sees_what_it_already_did(self):
+        """Without history the agent clicked a working "Next" link three times."""
+        seen = []
+
+        class _Recorder:
+            async def plan(self, goal, nodes, url="", screenshot=None, history=None):
+                seen.append([dict(h) for h in history])
+                return {"type": "scroll", "delta": 10} if len(seen) == 1 else {"type": "stop"}
+
+        agent = self._agent(_Recorder())
+        assert run_async(agent.execute_task("g", max_steps=3)) is True
+        assert seen[0] == []
+        assert seen[1][0]["action"]["type"] == "scroll" and "url_after" in seen[1][0]
+
+    def test_history_is_rendered_into_the_prompt(self):
+        from byconn.visual_agent.planner import _format_history
+
+        text = _format_history([{"step": 1, "action": {"type": "click", "element_id": 42},
+                                 "url_before": "https://q.test/", "url_after": "https://q.test/page/2/"}])
+        assert "step 1: click id=42; page changed to https://q.test/page/2/" in text
+        assert _format_history([]) == "(none yet)"
+
+    def test_click_below_the_fold_scrolls_first(self):
+        """The planner picked the right link at y=1622 in a 720px viewport, and
+        the click landed off-screen: the agent could never click below the fold."""
+
+        class _TallPage(_StubPage):
+            viewport_size = {"width": 1280, "height": 720}
+            max_scroll = 2000
+
+            def __init__(self):
+                super().__init__()
+                self.scroll_y = 0
+
+            async def evaluate(self, script, arg=None):
+                if arg is None:
+                    return self.nodes
+                target = max(0, min(self.max_scroll, self.scroll_y + arg[1]))
+                moved, self.scroll_y = target - self.scroll_y, target
+                return [0, moved]
+
+        class _ClickThenStop:
+            calls = 0
+
+            async def plan(self, goal, nodes, url="", screenshot=None):
+                self.calls += 1
+                return {"type": "click", "x": 640, "y": 1622} if self.calls == 1 else {"type": "stop"}
+
+        page = _TallPage()
+        agent = self._agent(_ClickThenStop(), page)
+        assert run_async(agent.execute_task("next page", max_steps=3)) is True
+        assert page.scroll_y == 1622 - 360
+        assert page.mouse.clicks == [(640, 360)]
+
+    def test_on_step_sees_every_step_and_cannot_break_the_task(self):
+        class _ScrollThenStop:
+            calls = 0
+
+            async def plan(self, goal, nodes, url="", screenshot=None):
+                self.calls += 1
+                return {"type": "scroll", "delta": 10} if self.calls == 1 else {"type": "stop"}
+
+        seen = []
+
+        def observer(record):
+            seen.append(record["action"]["type"])
+            raise RuntimeError("observer bug")
+
+        agent = VisualBrowserAgent(_StubPage(), planner=_ScrollThenStop(), step_delay=0,
+                                   on_step=observer)
+        assert run_async(agent.execute_task("g", max_steps=3)) is True
+        assert seen == ["scroll", "stop"]
+
     def test_executes_until_the_planner_stops(self):
         class _StopAfterType:
             def __init__(self):
@@ -902,7 +1037,25 @@ class TestVisualBrowserAgent:
                 raise RuntimeError("planner down")
 
         agent = self._agent(_Broken())
-        assert run_async(agent.execute_task("g", max_steps=3)) is True  # degrades to stop
+        # A crashed planner must not be reported as a completed task.
+        assert run_async(agent.execute_task("g", max_steps=3)) is False
+        assert "planner down" in agent.failure_reason
+
+    def test_error_stop_is_a_failure_but_plain_stop_is_success(self):
+        class _ErrorStop:
+            async def plan(self, goal, nodes, url="", screenshot=None):
+                return {"type": "stop", "error": "LLM call failed"}
+
+        class _Done:
+            async def plan(self, goal, nodes, url="", screenshot=None):
+                return {"type": "stop", "reason": "goal reached"}
+
+        failed = self._agent(_ErrorStop())
+        assert run_async(failed.execute_task("g", max_steps=3)) is False
+        assert failed.failure_reason == "LLM call failed"
+        done = self._agent(_Done())
+        assert run_async(done.execute_task("g", max_steps=3)) is True
+        assert done.failure_reason is None
 
     def test_screenshot_failure_is_not_fatal(self):
         class _NoShot(_StubPage):

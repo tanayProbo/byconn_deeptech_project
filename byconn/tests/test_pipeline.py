@@ -878,3 +878,78 @@ class TestPermanentErrorDetection:
     def test_by_name(self):
         assert is_permanent_error(type("NotFoundError", (Exception,), {})()) is True
         assert is_permanent_error(ValueError()) is False
+
+
+class TestExtractionCache:
+    """Identical text is extracted once; failures are never cached."""
+
+    GOOD = '{"entities": [{"name": "Acme", "type": "ORGANIZATION"}], "triples": []}'
+
+    def _extractor(self, monkeypatch, replies, **kwargs):
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        extractor = LLMExtractor(**kwargs)
+        calls = []
+
+        async def fake_call(prompt, image=None, model=None):
+            calls.append(prompt)
+            return replies[min(len(calls), len(replies)) - 1]
+
+        monkeypatch.setattr(extractor, "_call_with_retries", fake_call)
+        return extractor, calls
+
+    def test_identical_text_calls_the_model_once(self, monkeypatch):
+        extractor, calls = self._extractor(monkeypatch, [self.GOOD])
+        first = run_async(extractor.extract_knowledge("Acme builds rockets."))
+        second = run_async(extractor.extract_knowledge("Acme builds rockets."))
+        assert first == second and first["entities"][0]["name"] == "Acme"
+        assert len(calls) == 1 and extractor.cache_hits == 1
+
+    def test_cached_result_is_a_copy(self, monkeypatch):
+        extractor, _ = self._extractor(monkeypatch, [self.GOOD])
+        run_async(extractor.extract_knowledge("text")).get("entities").clear()
+        assert run_async(extractor.extract_knowledge("text"))["entities"]
+
+    def test_different_text_is_not_served_from_cache(self, monkeypatch):
+        extractor, calls = self._extractor(monkeypatch, [self.GOOD])
+        run_async(extractor.extract_knowledge("one"))
+        run_async(extractor.extract_knowledge("two"))
+        assert len(calls) == 2
+
+    def test_failures_are_not_cached(self, monkeypatch):
+        extractor, calls = self._extractor(monkeypatch, [None, self.GOOD])
+        assert run_async(extractor.extract_knowledge("x"))["entities"] == []
+        assert run_async(extractor.extract_knowledge("x"))["entities"]
+        assert len(calls) == 2
+
+    def test_cache_can_be_disabled(self, monkeypatch):
+        monkeypatch.setenv("LLM_CACHE_SIZE", "0")
+        extractor, calls = self._extractor(monkeypatch, [self.GOOD])
+        run_async(extractor.extract_knowledge("x"))
+        run_async(extractor.extract_knowledge("x"))
+        assert len(calls) == 2
+
+    def test_cache_is_bounded(self, monkeypatch):
+        extractor, _ = self._extractor(monkeypatch, [self.GOOD], cache_size=2)
+        for text in ("a", "b", "c"):
+            run_async(extractor.extract_knowledge(text))
+        assert len(extractor._cache) == 2
+
+    def test_concurrent_calls_are_capped(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        extractor = LLMExtractor(max_concurrency=2, cache_size=0)
+        active = {"now": 0, "peak": 0}
+
+        async def slow_call(prompt, image=None, model=None):
+            active["now"] += 1
+            active["peak"] = max(active["peak"], active["now"])
+            await asyncio.sleep(0.02)
+            active["now"] -= 1
+            return self.GOOD
+
+        monkeypatch.setattr(extractor, "_call_with_retries", slow_call)
+
+        async def burst():
+            await asyncio.gather(*(extractor.extract_knowledge(f"t{i}") for i in range(6)))
+
+        run_async(burst())
+        assert active["peak"] == 2

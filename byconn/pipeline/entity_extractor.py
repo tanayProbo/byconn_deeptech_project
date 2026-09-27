@@ -42,6 +42,17 @@ Return a valid JSON object matching this schema:
   "topics": ["topic1", "topic2"],
   "summary": "One-line executive summary of text"
 }}
+
+Rules:
+- "summary" is required: one sentence saying what this page is and offers.
+- Extract the things the page is about (named organizations, people, products,
+  places, events, technologies). Ignore navigation menus, category links,
+  buttons and boilerplate; a category name is a CONCEPT, not a PRODUCT.
+- Use only facts stated in the text. Each relation links an extracted entity
+  to another entity or to a value stated on the page (a price, date, place),
+  with a short UPPER_SNAKE_CASE predicate such as PRICED_AT or WRITTEN_BY.
+  Include the relations the page states; do not leave "triples" empty when
+  the page gives facts about its entities.
 """
 
 

@@ -1,0 +1,32 @@
+{
+  "url": "https://quotes.toscrape.com/page/1/",
+  "instruction": "Extract every quotation on this page with its author.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "quotes": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "author": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ]
+        }
+      }
+    }
+  },
+  "records_field": "quotes",
+  "key": "text",
+  "fields": [
+    "text",
+    "author"
+  ]
+}

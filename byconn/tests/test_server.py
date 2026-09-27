@@ -6,6 +6,7 @@ the health contract without any external service.
 """
 
 import asyncio
+import json
 
 import pytest
 
@@ -418,6 +419,11 @@ class TestDashboardAndDocs:
         assert client.get("/dashboard/app.js").status_code == 200
         assert client.get("/dashboard/style.css").status_code == 200
 
+    def test_dashboard_assets_are_revalidated(self, client):
+        """Heuristic caching left browsers running a stale console after updates."""
+        for asset in ("app.js", "style.css", "index.html"):
+            assert client.get(f"/dashboard/{asset}").headers["cache-control"] == "no-cache"
+
     def test_root_redirects_to_dashboard(self, client):
         response = client.get("/", follow_redirects=False)
         assert response.status_code in (302, 307)
@@ -472,25 +478,45 @@ class TestDashboardAndDocs:
         assert pending < awaited, "the pending state must be set before the await"
 
     def test_every_live_button_has_a_handler(self):
-        """Eight decorative buttons shipped in the original layout."""
+        """Eight decorative buttons once shipped in the original layout.
+
+        Every <button> must be wired: by an id app.js looks up, or by a
+        data-* hook app.js queries (nav tabs, presets, result tabs).
+        """
         import re
 
         live, js = self._dashboard()
-        labels = [
-            re.sub(r"\s+", " ", m).strip()
-            for m in re.findall(r"<button[^>]*>(.*?)</button>", live, re.S)
-        ]
-        assert labels, "expected the dashboard to keep its working buttons"
-        # Each live button is reachable either by an inline handler that
-        # setupSearch rewires, or by an addEventListener in app.js.
-        wired = ("startSearch", "clearSearch", "setupHealthIndicator",
-                 "loadDiscoveredApis")
-        for handler in wired:
-            assert handler in js, f"{handler} is missing from app.js"
-        for label in labels:
-            assert not re.search(r"\b(Export|Delete|Save|History)\b", label), (
-                f"unimplemented control is still visible: {label!r}"
+        buttons = re.findall(r"<button([^>]*)>(.*?)</button>", live, re.S)
+        assert buttons, "expected the dashboard to keep its working buttons"
+        for attrs, label in buttons:
+            button_id = re.search(r'id="([^"]+)"', attrs)
+            hooks = re.findall(r"(data-[a-z-]+)=", attrs)
+            wired = (button_id and f'getElementById("{button_id.group(1)}")' in js) or any(
+                f"[{hook}" in js for hook in hooks
             )
+            assert wired, f"button {label.strip()!r} has no handler in app.js"
+        for handler in ("startSearch", "clearSearch", "setupHealthIndicator", "loadDiscoveredApis"):
+            assert handler in js, f"{handler} is missing from app.js"
+
+    def test_dashboard_shows_no_invented_data(self):
+        """A previous revision drew a 'knowledge graph' from string literals."""
+        live, js = self._dashboard()
+        for fake in ("Example Corp", "Demo User", "BYCONN-X AI", "Stripe Pricing",
+                     "Illustrative", "Configured ✅"):
+            assert fake not in js and fake not in live, fake
+        assert "alert(" not in js
+
+    def test_untrusted_text_is_never_parsed_as_html(self):
+        _, js = self._dashboard()
+        assert "innerHTML" not in js and "insertAdjacentHTML" not in js
+        assert "onclick=" not in js
+
+    def test_scripts_are_local(self):
+        """No unpinned CDN script: the demo must work offline and not drift."""
+        import re
+
+        live, _ = self._dashboard()
+        assert re.findall(r'<script[^>]*src="([^"]+)"', live) == ["app.js"]
 
     def test_visual_action_mode_calls_the_agent_endpoint(self):
         """It used to only lower max_depth, so /act was unreachable from the UI."""
@@ -537,3 +563,279 @@ class TestShutdown:
         assert app.state.postgres.connected is False
         assert app.state.qdrant.connected is False
         assert app.state.neo4j.connected is False
+
+
+class TestPipelineConcurrency:
+    """Independent per-page steps overlap instead of running back to back."""
+
+    def test_page_save_and_llm_extraction_overlap(self, client, monkeypatch):
+        state = client.app.state
+        extraction_started = asyncio.Event()
+        original_save = state.postgres.upsert_crawled_page
+        original_extract = state.extractor.extract_knowledge
+
+        async def save(**kwargs):
+            # Sequential steps would deadlock here: extraction only starts
+            # after the save returns, so the wait times out and nothing saves.
+            await asyncio.wait_for(extraction_started.wait(), timeout=2)
+            return await original_save(**kwargs)
+
+        async def extract(text):
+            extraction_started.set()
+            return await original_extract(text)
+
+        monkeypatch.setattr(state.postgres, "upsert_crawled_page", save)
+        monkeypatch.setattr(state.extractor, "extract_knowledge", extract)
+        job = poll_job(client, start_crawl(client, "https://example.com/", 0))
+        assert job["pages_saved"] == 1
+        assert job["entities_extracted"] == 2
+
+    def test_real_status_code_is_stored(self, client):
+        poll_job(client, start_crawl(client, "https://example.com/", 0))
+        # FakeCrawler performs no navigation, so no status is known: it must be
+        # stored as unknown rather than invented as 200.
+        assert client.app.state.postgres.pages[0].get("status_code") is None
+
+
+class TestSeedRobots:
+    def test_disallowed_seed_is_not_crawled(self, client, monkeypatch):
+        from urllib.robotparser import RobotFileParser
+
+        parser = RobotFileParser()
+        parser.parse(["User-agent: *", "Disallow: /"])
+
+        async def _robots(_base_url):
+            return parser
+
+        monkeypatch.setattr(server_module, "load_robots", _robots)
+        job = poll_job(client, start_crawl(client, "https://example.com/", 1))
+        assert job["status"] == "failed"
+        assert job["pages_crawled"] == 0
+        assert any("robots.txt disallows" in e for e in job["errors"])
+
+
+SCHEMA = {
+    "type": "object",
+    "properties": {"pages": {"type": "array", "items": {"type": "object"}}},
+}
+
+
+def _start(client, **body):
+    response = client.post("/api/v1/crawl", json={"url": "https://example.com/", **body})
+    assert response.status_code == 202, response.text
+    return response.json()
+
+
+class TestStructuredCrawl:
+    def test_prompt_and_schema_reach_the_extractor_and_merge(self, client):
+        accepted = _start(client, max_depth=1, prompt="list the pages", schema=SCHEMA)
+        assert accepted["prompt"] == "list the pages" and accepted["has_schema"] is True
+        job = poll_job(client, accepted["job_id"])
+        calls = client.app.state.extractor.structured_calls
+        assert calls and calls[0]["instruction"] == "list the pages"
+        assert calls[0]["schema"] == SCHEMA
+        stored = client.app.state.jobs[accepted["job_id"]]
+        urls = sorted(p["url"] for p in stored.structured["data"]["pages"])
+        assert urls == ["https://example.com/", "https://example.com/a", "https://example.com/b"]
+        assert job["fields_verified"] == 3 and job["fields_unverified"] == 0
+
+    def test_plain_crawl_does_not_run_structured_extraction(self, client):
+        poll_job(client, start_crawl(client, "https://example.com/", 0))
+        assert client.app.state.extractor.structured_calls == []
+
+    @pytest.mark.parametrize("schema", [{"type": "array"}, {"type": "object", "properties": 3}])
+    def test_invalid_schema_is_rejected(self, client, schema):
+        response = client.post("/api/v1/crawl", json={"url": "https://example.com/", "schema": schema})
+        assert response.status_code == 422
+
+    def test_page_results_are_kept_and_persisted(self, client):
+        job_id = _start(client, max_depth=0, prompt="x")["job_id"]
+        poll_job(client, job_id)
+        page = client.app.state.jobs[job_id].pages[0]
+        assert page["summary"] == "An example page."
+        assert page["entities"][0]["name"] == "Example Corp"
+        stored = client.app.state.postgres.extraction_results
+        assert stored[0]["job_id"] == job_id and stored[0]["structured"]["data"]
+
+    def test_results_survive_a_dead_postgres(self, client):
+        client.app.state.postgres.fail = True
+        job_id = _start(client, max_depth=0, prompt="x")["job_id"]
+        job = poll_job(client, job_id)
+        assert job["status"] == "succeeded"
+        assert client.app.state.jobs[job_id].pages[0]["structured"]["data"]
+        assert any("result insert failed" in e for e in job["errors"])
+
+
+def _read_events(client, path):
+    events = []
+    with client.stream("GET", path) as response:
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        name = None
+        for line in response.iter_lines():
+            if line.startswith("event: "):
+                name = line[len("event: "):]
+            elif line.startswith("data: "):
+                events.append((name, json.loads(line[len("data: "):])))
+    return events
+
+
+class TestEventStream:
+    def test_live_crawl_streams_snapshot_pages_then_done(self, client):
+        client.app.state.extractor.delay = 0.3
+        job_id = _start(client, max_depth=0)["job_id"]
+        events = _read_events(client, f"/api/v1/crawl/{job_id}/events")
+        names = [name for name, _ in events]
+        assert names[0] == "snapshot" and names[-1] == "done"
+        assert "page" in names
+        page = next(data for name, data in events if name == "page")
+        assert page["page"]["url"] == "https://example.com/"
+        assert events[-1][1]["status"] == "succeeded"
+
+    def test_finished_job_gets_snapshot_and_done_immediately(self, client):
+        job_id = start_crawl(client, "https://example.com/", 0)
+        poll_job(client, job_id)
+        names = [name for name, _ in _read_events(client, f"/api/v1/crawl/{job_id}/events")]
+        assert names == ["snapshot", "done"]
+
+    def test_errors_are_streamed_once(self, client):
+        client.app.state.postgres.fail = True
+        client.app.state.extractor.delay = 0.3
+        job_id = _start(client, max_depth=0)["job_id"]
+        events = _read_events(client, f"/api/v1/crawl/{job_id}/events")
+        messages = [data["message"] for name, data in events if name == "job_error"]
+        assert messages and len(messages) == len(set(messages))
+
+    def test_unknown_job_is_404(self, client):
+        assert client.get("/api/v1/crawl/nope/events").status_code == 404
+        assert client.get("/api/v1/act/nope/events").status_code == 404
+
+    def test_subscribers_are_released(self, client):
+        job_id = start_crawl(client, "https://example.com/", 0)
+        poll_job(client, job_id)
+        _read_events(client, f"/api/v1/crawl/{job_id}/events")
+        assert client.app.state.jobs[job_id].events.subscriber_count == 0
+
+
+class TestResultsApi:
+    def test_results_carry_pages_structured_and_a_real_graph(self, client):
+        job_id = _start(client, max_depth=1, prompt="x", schema=SCHEMA)["job_id"]
+        poll_job(client, job_id)
+        body = client.get(f"/api/v1/crawl/{job_id}/results").json()
+        assert body["job"]["job_id"] == job_id
+        assert len(body["pages"]) == 3
+        assert len(body["structured"]["data"]["pages"]) == 3
+        graph = body["graph"]
+        # FakeExtractor returns the same two entities for every page: they
+        # must be deduplicated, typed, and joined by the one real relation.
+        assert sorted(n["label"] for n in graph["nodes"]) == ["Alice", "Example Corp"]
+        types = {n["label"]: n["type"] for n in graph["nodes"]}
+        assert types == {"Alice": "PERSON", "Example Corp": "ORGANIZATION"}
+        assert [e["type"] for e in graph["edges"]] == ["EMPLOYS"]
+        assert graph["truncated"] is False
+
+    def test_results_fall_back_to_postgres_after_eviction(self, client):
+        job_id = _start(client, max_depth=0, prompt="x")["job_id"]
+        poll_job(client, job_id)
+        client.app.state.jobs.pop(job_id)
+        body = client.get(f"/api/v1/crawl/{job_id}/results").json()
+        assert body["job"]["status"] == "archived"
+        assert body["pages"][0]["url"] == "https://example.com/"
+
+    def test_unknown_results_are_404(self, client):
+        assert client.get("/api/v1/crawl/nope/results").status_code == 404
+
+    def test_graph_is_capped(self):
+        pages = [{"url": "u", "entities": [{"name": f"e{i}", "type": "CONCEPT"} for i in range(20)],
+                  "triples": [{"subject": "e0", "predicate": "LINKS", "object": "e19"}]}]
+        graph = server_module.build_graph(pages, cap=10)
+        assert len(graph["nodes"]) == 10 and graph["truncated"] is True
+        assert graph["edges"] == []  # e19 did not fit, so no dangling edge
+
+    def test_jobs_lists_newest_first(self, client):
+        first = start_crawl(client, "https://example.com/", 0)
+        second = start_crawl(client, "https://example.com/", 0)
+        poll_job(client, first)
+        poll_job(client, second)
+        jobs = client.get("/api/v1/jobs").json()["jobs"]
+        assert [j["job_id"] for j in jobs[:2]] == [second, first]
+        assert all(j["kind"] == "crawl" for j in jobs)
+
+
+class TestExport:
+    def _job(self, client):
+        job_id = _start(client, max_depth=1, prompt="x", schema=SCHEMA)["job_id"]
+        poll_job(client, job_id)
+        return job_id
+
+    def test_json_download(self, client):
+        job_id = self._job(client)
+        response = client.get(f"/api/v1/crawl/{job_id}/export?format=json")
+        assert response.status_code == 200
+        assert "attachment" in response.headers["content-disposition"]
+        assert json.loads(response.text)["job"]["job_id"] == job_id
+
+    def test_jsonl_has_one_page_per_line(self, client):
+        job_id = self._job(client)
+        lines = client.get(f"/api/v1/crawl/{job_id}/export?format=jsonl").text.splitlines()
+        assert len(lines) == 3 and all(json.loads(line)["url"] for line in lines)
+
+    def test_csv_flattens_the_array_with_sources(self, client):
+        job_id = self._job(client)
+        response = client.get(f"/api/v1/crawl/{job_id}/export?format=csv")
+        assert response.status_code == 200 and response.headers["content-type"].startswith("text/csv")
+        rows = response.text.strip().splitlines()
+        assert rows[0] == "url,sources"
+        assert len(rows) == 4
+
+    def test_csv_without_a_table_is_400(self, client):
+        job_id = start_crawl(client, "https://example.com/", 0)
+        poll_job(client, job_id)
+        response = client.get(f"/api/v1/crawl/{job_id}/export?format=csv")
+        assert response.status_code == 400 and "array of objects" in response.json()["detail"]
+
+    def test_unknown_format_is_400(self, client):
+        job_id = self._job(client)
+        assert client.get(f"/api/v1/crawl/{job_id}/export?format=xml").status_code == 400
+
+    def test_csv_neutralises_formulas(self):
+        result = {"data": {"rows": [{"a": "=HYPERLINK(\"x\")", "b": 2}]}, "citations": {}}
+        _field, columns, rows = server_module.structured_table(result)
+        assert columns == ["a", "b", "sources"]
+        assert rows[0][0].startswith("'=") and rows[0][1] == "2"
+
+
+class TestHealthDetail:
+    def test_llm_detail_names_the_model_but_never_a_key(self, client):
+        body = client.get("/api/v1/health").json()
+        assert body["llm"]["detail"] == "openai · fake-model"
+        assert "sk-" not in json.dumps(body) and "gsk_" not in json.dumps(body)
+
+
+def test_no_sse_event_is_named_error():
+    """EventSource delivers an event named "error" to onerror as well, so the
+    dashboard took the first job warning for a dropped connection."""
+    import inspect
+
+    assert 'publish("error"' not in inspect.getsource(server_module)
+
+
+def test_rerunning_a_crawl_is_not_deduplicated_against_the_first(client):
+    """Dedup state was shared by every job, so a second crawl of the same site
+    skipped every page as a duplicate and returned nothing."""
+    first = poll_job(client, start_crawl(client, "https://example.com/", 0))
+    second = poll_job(client, start_crawl(client, "https://example.com/", 0))
+    assert first["duplicates_skipped"] == 0
+    assert second["duplicates_skipped"] == 0
+    assert second["entities_extracted"] == first["entities_extracted"] > 0
+
+
+def test_entities_reach_neo4j_even_without_relations(client, monkeypatch):
+    """A page whose extraction had entities but no triples left Neo4j empty."""
+    extractor = client.app.state.extractor
+    monkeypatch.setattr(extractor, "CANNED", {**extractor.CANNED, "triples": []})
+    job = poll_job(client, start_crawl(client, "https://example.com/", 0))
+    neo4j = client.app.state.neo4j
+    assert neo4j.pages == ["https://example.com/"]
+    assert [len(entities) for _url, entities in neo4j.links] == [2]
+    assert neo4j.triples == [] and job["relations_written"] == 0

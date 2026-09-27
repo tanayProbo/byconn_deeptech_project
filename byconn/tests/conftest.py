@@ -28,6 +28,7 @@ _MANAGED_ENV = (
     "PIPELINE_STEP_TIMEOUT", "HEALTH_PROBE_TIMEOUT", "CRAWL_CONCURRENCY",
     "CRAWL_PAGE_CONCURRENCY", "CRAWL_MAX_PAGES", "CRAWL_HEADLESS",
     "CRAWL_DEDUPLICATE", "CRAWL_FOLLOW_LINKS", "API_INTELLIGENCE",
+    "LLM_CACHE_SIZE", "LLM_MAX_CONCURRENCY", "LLM_MAX_WINDOWS", "SSE_HEARTBEAT_SECONDS", "NEO4J_MAX_RETRY_TIME", "GRAPH_NODE_CAP", "PAGE_HANDLER_TIMEOUT", "CHUNK_SIZE",
 )
 
 # Runs at conftest import, i.e. before any test module is imported.
@@ -77,8 +78,9 @@ def server_app(monkeypatch, fake_embedder):
 
     monkeypatch.setattr(server_module, "load_robots", _no_robots)
 
-    pytest.importorskip("fastapi")
-    starlette_testclient = pytest.importorskip("fastapi.testclient")
+    # Imported, not importorskip'd: a missing httpx used to skip every API
+    # test silently, so a broken install still looked green.
+    import fastapi.testclient as starlette_testclient
     return server_module.app, starlette_testclient.TestClient
 
 

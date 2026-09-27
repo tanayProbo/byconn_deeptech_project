@@ -369,6 +369,26 @@ CREATE TABLE IF NOT EXISTS discovered_apis (
 
 CREATE INDEX IF NOT EXISTS idx_discovered_apis_host ON discovered_apis (host);
 CREATE INDEX IF NOT EXISTS idx_discovered_apis_path ON discovered_apis (path);
+
+-- Per-page LLM results: summary/topics and schema-driven data with citations.
+CREATE TABLE IF NOT EXISTS extraction_results (
+    id            BIGSERIAL PRIMARY KEY,
+    job_id        TEXT        NOT NULL,
+    url           TEXT        NOT NULL,
+    title         TEXT,
+    status_code   INTEGER,
+    summary       TEXT,
+    topics        JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    entities      JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    triples       JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    data          JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    citations     JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    unverified    JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    model         TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_extraction_results_job_id ON extraction_results (job_id);
 """
 
 
@@ -464,7 +484,7 @@ class PostgresAdapter(BaseAdapter):
         title: str = "",
         job_id: str = "",
         chunk_count: int = 0,
-        status_code: int = 200,
+        status_code: Optional[int] = 200,
         depth: int = 0,
         content_hash: str = "",
     ) -> int:
@@ -704,9 +724,68 @@ class PostgresAdapter(BaseAdapter):
         )
         return [dict(row) for row in rows]
 
+    async def insert_extraction_result(self, result: Dict[str, Any]) -> int:
+        """Stores one page's LLM results. Returns the new row id.
+
+        ``result`` carries ``job_id`` and ``url`` plus any of ``title``,
+        ``status_code``, ``summary``, ``topics``, ``entities``, ``triples``,
+        ``model`` and a ``structured`` dict with ``data``, ``citations`` and
+        ``unverified``.
+        """
+        await self._ensure()
+        structured = result.get("structured") or {}
+        return await self._require_pool().fetchval(
+            """
+            INSERT INTO extraction_results
+                (job_id, url, title, status_code, summary, topics, entities,
+                 triples, data, citations, unverified, model)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            RETURNING id
+            """,
+            result["job_id"],
+            result["url"],
+            result.get("title"),
+            result.get("status_code"),
+            result.get("summary"),
+            list(result.get("topics") or []),
+            list(result.get("entities") or []),
+            list(result.get("triples") or []),
+            structured.get("data") or {},
+            structured.get("citations") or {},
+            list(structured.get("unverified") or []),
+            result.get("model"),
+        )
+
+    async def list_extraction_results(self, job_id: str, limit: int = 500) -> List[Dict[str, Any]]:
+        """Lists a job's per-page results in crawl order."""
+        await self._ensure()
+        rows = await self._require_pool().fetch(
+            """
+            SELECT job_id, url, title, status_code, summary, topics, entities,
+                   triples, data, citations, unverified, model, created_at
+            FROM extraction_results
+            WHERE job_id = $1
+            ORDER BY id
+            LIMIT $2
+            """,
+            job_id,
+            limit,
+        )
+        pages = []
+        for row in rows:
+            item = dict(row)
+            item["structured"] = {
+                "data": item.pop("data"),
+                "citations": item.pop("citations"),
+                "unverified": item.pop("unverified"),
+            }
+            pages.append(item)
+        return pages
+
     async def count_rows(self, table: str) -> int:
         """Returns the row count of a whitelisted table, for health checks."""
-        allowed = {"crawled_pages", "extracted_entities", "api_health_checks", "discovered_apis"}
+        allowed = {"crawled_pages", "extracted_entities", "api_health_checks",
+                   "discovered_apis", "extraction_results"}
         if table not in allowed:
             raise ValueError(f"Unsupported table: {table!r}; expected one of {sorted(allowed)}")
         await self._ensure()
@@ -970,16 +1049,31 @@ class Neo4jAdapter(BaseAdapter):
         self.password = password or _env_str("NEO4J_PASSWORD", DEFAULT_NEO4J_PASSWORD)
         self.database = database or _env_opt("NEO4J_DATABASE")
         self.max_connection_pool_size = max_connection_pool_size or _env_int("NEO4J_POOL_SIZE", 50)
+        self.max_retry_time = _env_float("NEO4J_MAX_RETRY_TIME", 5.0)
         self._driver = None
 
     # --- lifecycle ----------------------------------------------------------
     async def _connect(self) -> None:
         logger.info("Connecting to Neo4j at %s", self.uri)
-        self._driver = AsyncGraphDatabase.driver(
+        driver = AsyncGraphDatabase.driver(
             self.uri,
             auth=(self.user, self.password),
             max_connection_pool_size=self.max_connection_pool_size,
+            # The driver retries failed transactions for 30s by default, so
+            # each write to a down server stalled a crawl page for its whole
+            # step timeout. Fail fast and let the adapter's backoff apply.
+            max_transaction_retry_time=self.max_retry_time,
         )
+        try:
+            # Creating a driver opens no connection. Without this check the
+            # adapter reported "ready" for an unreachable server, and every
+            # later call waited out the driver's retries instead of failing
+            # fast under the connect backoff.
+            await driver.verify_connectivity()
+        except Exception:
+            await driver.close()
+            raise
+        self._driver = driver
         await self._ensure_constraints()
         logger.info("Neo4j driver ready and constraints ensured.")
 
@@ -1177,22 +1271,25 @@ class Neo4jAdapter(BaseAdapter):
             return 0
 
         async def _txn(tx) -> None:
+            # One statement: Cypher variables do not survive across tx.run
+            # calls, so a page MERGEd in one statement and referenced as `p`
+            # in the next is unbound there, and MERGE would create a fresh
+            # anonymous node per entity instead of linking the real page.
             await tx.run(
-                f"MERGE (p:{page_label} {{url: $url}}) ON CREATE SET p.created_at = timestamp()",
+                f"""
+                MERGE (p:{page_label} {{url: $url}})
+                ON CREATE SET p.created_at = timestamp()
+                WITH p
+                UNWIND $entities AS item
+                MERGE (e:{entity_label} {{key: item.name}})
+                ON CREATE SET e.name = item.name, e.created_at = timestamp()
+                SET e.entity_type = item.type
+                MERGE (p)-[r:MENTIONS]->(e)
+                SET r.updated_at = timestamp()
+                """,
                 url=url,
+                entities=valid,
             )
-            for item in valid:
-                await tx.run(
-                    f"""
-                    MERGE (e:{entity_label} {{key: $name}})
-                    ON CREATE SET e.name = $name, e.created_at = timestamp()
-                    SET e.entity_type = $type
-                    MERGE (p)-[r:MENTIONS]->(e)
-                    SET r.updated_at = timestamp()
-                    """,
-                    name=item["name"],
-                    type=item["type"],
-                )
 
         async with self._require_driver().session(database=self.database) as session:
             await session.execute_write(_txn)

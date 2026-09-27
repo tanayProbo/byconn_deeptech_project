@@ -1,6 +1,7 @@
-import logging
 import asyncio
-from typing import Any, Dict, List, Optional
+import inspect
+import logging
+from typing import Any, Callable, Dict, List, Optional
 from playwright.async_api import Page
 from .dom_parser import DOMParser
 from .planner import build_planner
@@ -30,22 +31,30 @@ class VisualBrowserAgent:
         llm_client: Any = None,
         planner: Optional[Any] = None,
         step_delay: float = STEP_DELAY_SECONDS,
+        on_step: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
         self.page = page
         self.llm_client = llm_client
         self.dom_parser = DOMParser()
         self.planner = planner if planner is not None else build_planner()
         self.step_delay = step_delay
+        # Called with each history record as it is taken, for live progress.
+        self.on_step = on_step
         # Observation/action trace, useful for debugging and for API responses.
         self.history: List[Dict[str, Any]] = []
+        # Why the last run ended without reaching its goal, if it did.
+        self.failure_reason: Optional[str] = None
 
     async def execute_task(self, prompt: str, max_steps: int = 10) -> bool:
         """Executes browser interactions step-by-step to achieve the goal.
 
-        Returns ``True`` when the agent stopped early (goal reached or the
-        planner asked to stop) and ``False`` when it ran out of steps.
+        Returns ``True`` only when the planner deliberately chose ``stop``.
+        A planner error, an unusable model reply, an impossible action or an
+        exhausted step budget all return ``False`` with ``failure_reason``
+        set: a stop caused by a failure must never be reported as success.
         """
         logger.info(f"Visual Agent starting execution of goal: '{prompt}'")
+        self.failure_reason = None
 
         for step in range(max_steps):
             logger.info(f"--- Step {step + 1}/{max_steps} ---")
@@ -64,17 +73,20 @@ class VisualBrowserAgent:
             # 2. Parse the interactable visual nodes.
             nodes = await self.dom_parser.get_interactables(self.page)
 
-            # 3. Ask the planner for the next action, passing the screenshot.
+            # 3. Ask the planner for the next action, passing the screenshot
+            #    and what was already done, so it can tell when the goal is
+            #    reached instead of repeating a successful click.
+            kwargs: Dict[str, Any] = {"url": self.page.url}
+            accepted = self._planner_params()
+            if "screenshot" in accepted:
+                kwargs["screenshot"] = screenshot_bytes
+            if "history" in accepted:
+                kwargs["history"] = self.history
             try:
-                action = await self.planner.plan(
-                    prompt, nodes, url=self.page.url, screenshot=screenshot_bytes
-                )
-            except TypeError:
-                # Planners written before the screenshot argument.
-                action = await self.planner.plan(prompt, nodes, url=self.page.url)
+                action = await self.planner.plan(prompt, nodes, **kwargs)
             except Exception as exc:
                 logger.error("planner failed: %s", exc)
-                action = {"type": "stop"}
+                action = {"type": "stop", "error": f"planner failed: {exc}"}
             logger.info(f"Agent decided action: {action}")
 
             self.history.append({
@@ -83,8 +95,17 @@ class VisualBrowserAgent:
                 "node_count": len(nodes),
                 "action": action,
             })
+            if self.on_step is not None:
+                try:
+                    self.on_step(self.history[-1])
+                except Exception as exc:  # observers must never break the task
+                    logger.debug("on_step callback failed: %s", exc)
 
             if action.get("type") == "stop":
+                if action.get("error"):
+                    self.failure_reason = str(action["error"])
+                    logger.error("Agent stopped on error: %s", self.failure_reason)
+                    return False
                 logger.info("Goal reached or agent requested completion.")
                 return True
 
@@ -101,16 +122,22 @@ class VisualBrowserAgent:
                     action.get("x"),
                     action.get("y"),
                 )
+                self.failure_reason = "no interactable elements to act on"
                 return False
 
             # 4. Perform the decided action.
+            url_before = getattr(self.page, "url", "")
             performed = await self._run_action(action)
             if not performed:
                 logger.info("Action could not be performed; ending the task.")
+                self.failure_reason = f"could not perform action {action!r}"
                 return False
             await asyncio.sleep(self.step_delay)  # wait for layout to re-render
+            self.history[-1]["url_before"] = url_before
+            self.history[-1]["url_after"] = getattr(self.page, "url", "")
 
         logger.error("Reached maximum steps without fully executing agent task.")
+        self.failure_reason = f"step budget of {max_steps} exhausted"
         return False
 
     async def _decide_action(
@@ -121,6 +148,50 @@ class VisualBrowserAgent:
             prompt, nodes, url=getattr(self.page, "url", ""), screenshot=screenshot
         )
 
+    def _planner_params(self) -> set:
+        """Keyword arguments the planner's plan() accepts.
+
+        Inspected rather than probed with try/except TypeError, which also
+        swallowed genuine TypeErrors raised inside a planner.
+        """
+        try:
+            params = inspect.signature(self.planner.plan).parameters
+        except (TypeError, ValueError):
+            return set()
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return {"screenshot", "history"}
+        return set(params)
+
+    async def _bring_into_view(self, x: float, y: float) -> tuple:
+        """Scrolls so a target at viewport coordinates (x, y) is on screen.
+
+        The DOM parser reports every element, including those below the fold,
+        whose y exceeds the viewport height. A mouse click there lands outside
+        the page and does nothing, so the agent could never press a button it
+        had to scroll to. Returns the coordinates after scrolling, adjusted by
+        the distance the page actually moved (scrolling stops at the edges).
+        """
+        viewport = getattr(self.page, "viewport_size", None) or {}
+        width, height = viewport.get("width"), viewport.get("height")
+        if not width or not height or (0 <= x < width and 0 <= y < height):
+            return x, y
+        dx = 0 if 0 <= x < width else x - width / 2
+        dy = 0 if 0 <= y < height else y - height / 2
+        try:
+            moved = await self.page.evaluate(
+                """([dx, dy]) => {
+                    const x0 = window.scrollX, y0 = window.scrollY;
+                    window.scrollBy(dx, dy);
+                    return [window.scrollX - x0, window.scrollY - y0];
+                }""",
+                [dx, dy],
+            )
+        except Exception as exc:
+            logger.debug("scroll into view failed: %s", exc)
+            return x, y
+        await asyncio.sleep(0.2)
+        return x - moved[0], y - moved[1]
+
     async def _run_action(self, action: Dict[str, Any]) -> bool:
         """Performs mouse/keyboard actions using element coordinates.
 
@@ -129,6 +200,8 @@ class VisualBrowserAgent:
         """
         action_type = action.get("type")
         x, y = action.get("x"), action.get("y")
+        if action_type in {"click", "type", "hover"} and x is not None and y is not None:
+            x, y = await self._bring_into_view(x, y)
 
         if action_type == "click":
             if x is None or y is None:

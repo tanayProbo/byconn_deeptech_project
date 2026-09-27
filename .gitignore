@@ -54,3 +54,4 @@ openapi_*.json
 
 # Node (dashboard)
 node_modules/
+byconn_results.json

@@ -1,0 +1,26 @@
+[
+  {
+    "dish": "Patatas bravas",
+    "price": "€6.50"
+  },
+  {
+    "dish": "Gambas al ajillo",
+    "price": "€11.00"
+  },
+  {
+    "dish": "Pan con tomate",
+    "price": "€4.50"
+  },
+  {
+    "dish": "Paella valenciana (for two)",
+    "price": "€34.00"
+  },
+  {
+    "dish": "Pulpo a la gallega",
+    "price": "€19.50"
+  },
+  {
+    "dish": "Berenjenas con miel",
+    "price": "€9.00"
+  }
+]

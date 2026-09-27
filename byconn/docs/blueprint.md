@@ -1,4 +1,12 @@
 # BYCONN-X DATA ENGINE — SYSTEM BLUEPRINT
+
+> **Status: target design, not a description of the current code.** This
+> blueprint includes components that are planned but not built, among them
+> Kafka, Ray, ClickHouse (replaced by PostgreSQL), HashiCorp Vault, PII
+> sanitisation and multi-region fleets. The README's
+> ["What is built, and what is not"](../../README.md#what-is-built-and-what-is-not)
+> table is the source of truth for what exists today.
+
 ## Universal AI-Powered Data Acquisition Infrastructure
 
 ---

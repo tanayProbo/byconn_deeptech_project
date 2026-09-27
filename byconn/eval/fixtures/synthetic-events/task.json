@@ -1,0 +1,32 @@
+{
+  "url": "https://synthetic.example/synthetic-events",
+  "instruction": "Extract the upcoming events with their date, written as on the page. Skip past events.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "events": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "date": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ]
+        }
+      }
+    }
+  },
+  "records_field": "events",
+  "key": "name",
+  "fields": [
+    "name",
+    "date"
+  ]
+}

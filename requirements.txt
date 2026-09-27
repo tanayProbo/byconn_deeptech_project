@@ -23,7 +23,9 @@ playwright>=1.42.0
 beautifulsoup4>=4.12.3
 aiohttp>=3.9.3
 genson>=1.2.2
+jsonschema>=4.18.0
 psutil>=5.9.8
 
 # --- Testing ---
 pytest
+httpx>=0.27   # FastAPI TestClient; without it the API tests are skipped

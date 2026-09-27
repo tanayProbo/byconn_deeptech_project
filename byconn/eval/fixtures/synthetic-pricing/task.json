@@ -1,0 +1,32 @@
+{
+  "url": "https://synthetic.example/synthetic-pricing",
+  "instruction": "Extract each pricing plan with its current monthly price as shown.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "plans": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "price": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ]
+        }
+      }
+    }
+  },
+  "records_field": "plans",
+  "key": "name",
+  "fields": [
+    "name",
+    "price"
+  ]
+}

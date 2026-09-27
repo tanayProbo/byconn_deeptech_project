@@ -1,0 +1,32 @@
+{
+  "url": "https://synthetic.example/synthetic-jobs",
+  "instruction": "Extract the open positions with their location. Positions that are already filled are not open.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "jobs": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "location": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "title"
+          ]
+        }
+      }
+    }
+  },
+  "records_field": "jobs",
+  "key": "title",
+  "fields": [
+    "title",
+    "location"
+  ]
+}

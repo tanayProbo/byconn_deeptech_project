@@ -587,8 +587,9 @@ class _FakePool:
     async def executemany(self, query, rows):
         self.sink["executemany"].append((query, rows))
 
-    async def fetchval(self, query):
+    async def fetchval(self, query, *args):
         self.sink["fetchval"].append(query)
+        self.sink.setdefault("fetchval_args", []).append(args)
         return 1 if query.strip() == "SELECT 1" else 7
 
     async def close(self):
@@ -639,6 +640,36 @@ class TestPostgresAdapter:
         assert written == 1
         _query, rows = sink["executemany"][0]
         assert rows[0][2] == "ORG"
+
+    def test_extraction_result_round_trip_shapes(self, postgres):
+        adapter, sink = postgres
+        row_id = run_async(adapter.insert_extraction_result({
+            "job_id": "j1", "url": "https://a.test/", "title": "A",
+            "summary": "s", "topics": ("t",), "model": "m",
+            "structured": {"data": {"x": 1}, "citations": {"/x": [{"quote": "q"}]},
+                           "unverified": []},
+        }))
+        assert row_id == 7
+        args = sink["fetchval_args"][-1]
+        assert args[0] == "j1" and args[5] == ["t"] and args[8] == {"x": 1}
+
+        sink_rows = [{"job_id": "j1", "url": "u", "title": None, "status_code": 200,
+                      "summary": "s", "topics": [], "entities": [], "triples": [],
+                      "data": {"x": 1}, "citations": {}, "unverified": ["/x"],
+                      "model": "m", "created_at": None}]
+
+        async def fetch(query, *a):
+            return sink_rows
+
+        adapter._pool.fetch = fetch
+        pages = run_async(adapter.list_extraction_results("j1"))
+        assert pages[0]["structured"] == {"data": {"x": 1}, "citations": {}, "unverified": ["/x"]}
+        assert "data" not in pages[0]
+
+    def test_schema_creates_extraction_results(self, postgres):
+        from byconn.storage.adapters import SCHEMA_SQL
+
+        assert "CREATE TABLE IF NOT EXISTS extraction_results" in SCHEMA_SQL
 
     def test_insert_entities_noop_on_empty(self, postgres):
         adapter, sink = postgres
@@ -743,6 +774,9 @@ class _FakeDriver:
         self.sink["database"] = database
         return _FakeSession(self.sink, database)
 
+    async def verify_connectivity(self):
+        return None
+
     async def close(self):
         self.closed = True
 
@@ -827,7 +861,20 @@ class TestNeo4jAdapter:
             {"name": "OpenAI", "entity_type": "org"}, {"name": ""}, "junk",
         ])) == 1
         assert any(":MENTIONS" in q for q, _ in sink["cypher"])
-        assert any(p.get("type") == "ORG" for _q, p in sink["cypher"])
+        entities = next(p["entities"] for _q, p in sink["cypher"] if "entities" in p)
+        assert entities == [{"name": "OpenAI", "type": "ORG"}]
+
+    def test_link_page_entities_binds_the_page_in_the_same_statement(self, neo4j):
+        # Variables do not carry across tx.run calls: a MENTIONS edge from a
+        # `p` bound in an earlier statement would hang off a phantom node.
+        adapter, sink = neo4j
+        run_async(adapter.link_page_entities("https://a.test/", [
+            {"name": "OpenAI"}, {"name": "Anthropic"},
+        ]))
+        linking = [q for q, _ in sink["cypher"] if ":MENTIONS" in q]
+        assert linking, "no MENTIONS statement was issued"
+        for query in linking:
+            assert "MERGE (p:Page" in query
 
     def test_neighbours_and_stats(self, neo4j):
         adapter, sink = neo4j
@@ -861,3 +908,47 @@ class TestNeo4jAdapter:
         adapter.database = "neo4j"
         run_async(adapter.upsert_page("https://a.test/"))
         assert sink["database"] == "neo4j"
+
+
+class TestNeo4jFailsFast:
+    """A down Neo4j used to be reported 'ready' and stall every write."""
+
+    def _patch_driver(self, monkeypatch, reachable):
+        from byconn.storage import adapters as module
+
+        made = []
+
+        class _Driver:
+            def __init__(self, uri, **kwargs):
+                self.kwargs = kwargs
+                self.closed = False
+                made.append(self)
+
+            async def verify_connectivity(self):
+                if not reachable:
+                    raise ConnectionRefusedError("neo4j down")
+
+            def session(self, database=None):
+                return _FakeSession({"cypher": []}, database)
+
+            async def close(self):
+                self.closed = True
+
+        monkeypatch.setattr(module.AsyncGraphDatabase, "driver", _Driver)
+        return made
+
+    def test_unreachable_server_fails_connect_and_backs_off(self, monkeypatch):
+        made = self._patch_driver(monkeypatch, reachable=False)
+        adapter = Neo4jAdapter()
+        with pytest.raises(ConnectionRefusedError):
+            run_async(adapter.connect())
+        assert made[0].closed and adapter._driver is None and not adapter.is_connected
+        # Within the backoff window the next call fails at once, with no new driver.
+        with pytest.raises(ConnectionError):
+            run_async(adapter.write_triple("a", "REL", "b"))
+        assert len(made) == 1
+
+    def test_driver_retry_time_is_bounded(self, monkeypatch):
+        made = self._patch_driver(monkeypatch, reachable=True)
+        run_async(Neo4jAdapter().connect())
+        assert made[0].kwargs["max_transaction_retry_time"] == 5.0

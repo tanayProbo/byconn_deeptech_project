@@ -125,6 +125,7 @@ class FakePostgres:
         self.entities: List[tuple] = []
         self.discovered: List[Dict[str, Any]] = []
         self.health: List[Dict[str, Any]] = []
+        self.extraction_results: List[Dict[str, Any]] = []
         self.connected = False
         self.fail = False
 
@@ -144,8 +145,20 @@ class FakePostgres:
         if self.fail:
             raise ConnectionRefusedError("postgres down")
         self.pages.append(dict(url=url, markdown=markdown, title=title, job_id=job_id,
-                               chunk_count=chunk_count, depth=depth))
+                               chunk_count=chunk_count, depth=depth,
+                               status_code=status_code))
         return 1000 + len(self.pages)
+
+    async def insert_extraction_result(self, result: Dict[str, Any]) -> int:
+        if self.fail:
+            raise ConnectionRefusedError("postgres down")
+        self.extraction_results.append(dict(result))
+        return len(self.extraction_results)
+
+    async def list_extraction_results(self, job_id: str, limit: int = 500) -> List[Dict[str, Any]]:
+        if self.fail:
+            raise ConnectionRefusedError("postgres down")
+        return [dict(r) for r in self.extraction_results if r.get("job_id") == job_id][:limit]
 
     async def insert_entities(self, page_id, entities, source_url: str = "") -> int:
         if self.fail:
@@ -257,7 +270,9 @@ class FakeExtractor:
         self.provider = "openai"
         self.model = "fake-model"
         self.available = True
+        self.delay = 0.0
         self.seen_text: List[str] = []
+        self.structured_calls: List[Dict[str, Any]] = []
         FakeExtractor.instances.append(self)
 
     @property
@@ -270,7 +285,22 @@ class FakeExtractor:
 
     async def extract_knowledge(self, text: str) -> Dict[str, Any]:
         self.seen_text.append(text)
+        if self.delay:
+            await asyncio.sleep(self.delay)
         return dict(self.CANNED)
+
+    async def extract_structured(self, text: str, instruction: str = "",
+                                 schema=None, url: str = "") -> Dict[str, Any]:
+        """Echoes a structured result whose one citation is the page URL."""
+        self.structured_calls.append({"instruction": instruction, "schema": schema, "url": url})
+        return {
+            "data": {"pages": [{"url": url}]},
+            "citations": {"/pages/0/url": [{"quote": url, "url": url}]},
+            "unverified": [],
+            "schema_errors": [],
+            "windows": 1,
+            "windows_skipped": 0,
+        }
 
 
 class FakeEmbedder:

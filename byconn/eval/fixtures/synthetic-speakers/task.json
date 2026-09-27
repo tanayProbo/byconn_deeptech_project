@@ -1,0 +1,32 @@
+{
+  "url": "https://synthetic.example/synthetic-speakers",
+  "instruction": "Extract every conference speaker with the company they work for.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "speakers": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "company": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ]
+        }
+      }
+    }
+  },
+  "records_field": "speakers",
+  "key": "name",
+  "fields": [
+    "name",
+    "company"
+  ]
+}

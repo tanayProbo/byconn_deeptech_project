@@ -40,6 +40,9 @@ GOAL:
 
 CURRENT PAGE: {url}
 {vision_note}
+PREVIOUS ACTIONS (oldest first):
+{history}
+
 INTERACTABLE ELEMENTS (id, role, label, x, y):
 {nodes}
 
@@ -51,6 +54,8 @@ Rules:
 - Use "type" with a "value" when the goal requires entering text.
 - Use "scroll" to reach elements further down the page.
 - Use "stop" when the goal is already satisfied or no action can help.
+- Check the previous actions first: if one already achieved the goal (for
+  example the page changed as intended), reply "stop". Do not repeat it.
 """
 
 
@@ -66,6 +71,19 @@ def _format_nodes(nodes: Sequence[Dict[str, Any]]) -> str:
     return "\n".join(lines) if lines else "(no interactable elements found)"
 
 
+def _format_history(history: Optional[Sequence[Dict[str, Any]]]) -> str:
+    """Renders earlier steps with the page change each one caused."""
+    lines = []
+    for record in list(history or [])[-8:]:
+        action = record.get("action") or {}
+        target = f" id={action.get('element_id')}" if action.get("element_id") is not None else ""
+        value = f" value={action.get('value')!r}" if action.get("value") else ""
+        before, after = record.get("url_before"), record.get("url_after")
+        moved = f"; page changed to {after}" if after and after != before else "; page URL unchanged"
+        lines.append(f"- step {record.get('step')}: {action.get('type')}{target}{value}{moved}")
+    return "\n".join(lines) if lines else "(none yet)"
+
+
 def normalise_action(raw: Any, nodes: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     """Coerces a model reply into a valid action dict.
 
@@ -73,13 +91,16 @@ def normalise_action(raw: Any, nodes: Sequence[Dict[str, Any]]) -> Dict[str, Any
     real node, and falls back to ``stop`` for anything unrecognised.
     """
     if not isinstance(raw, dict):
-        return {"type": "stop"}
+        return {"type": "stop", "error": "planner reply was not a JSON object"}
 
     action_type = str(raw.get("type") or "").strip().lower()
     if action_type not in VALID_ACTIONS:
-        return {"type": "stop"}
+        return {"type": "stop", "error": f"planner chose unknown action {action_type!r}"}
     if action_type == "stop":
-        return {"type": "stop"}
+        stop: Dict[str, Any] = {"type": "stop"}
+        if raw.get("reason"):
+            stop["reason"] = str(raw["reason"])[:200]
+        return stop
 
     action: Dict[str, Any] = {"type": action_type}
 
@@ -111,7 +132,7 @@ def normalise_action(raw: Any, nodes: Sequence[Dict[str, Any]]) -> Dict[str, Any
             action["x"] = int(raw["x"])
             action["y"] = int(raw["y"])
         except (KeyError, TypeError, ValueError):
-            return {"type": "stop"}
+            return {"type": "stop", "error": f"{action_type} has no resolvable target"}
 
     if action_type == "type":
         action["value"] = str(raw.get("value") or "")
@@ -178,7 +199,7 @@ class HeuristicPlanner:
                 "element_id": first.get("id"),
                 "reason": "heuristic: fallback to first interactable",
             }
-        return {"type": "stop"}
+        return {"type": "stop", "error": "no interactable elements"}
 
 
 class LLMPlanner:
@@ -191,6 +212,9 @@ class LLMPlanner:
 
     def __init__(self, extractor: Any = None):
         self._extractor = extractor
+        # Set once a vision request fails (e.g. a text-only model rejects
+        # images); later steps then plan from the element list alone.
+        self.vision_disabled = False
 
     @property
     def extractor(self) -> Any:
@@ -220,6 +244,7 @@ class LLMPlanner:
         nodes: Sequence[Dict[str, Any]],
         url: str = "",
         screenshot: Optional[bytes] = None,
+        history: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Asks the model for the next action; falls back to ``stop`` on error.
 
@@ -228,9 +253,11 @@ class LLMPlanner:
         """
         extractor = self.extractor
         if not extractor.is_available:
-            return {"type": "stop"}
+            return {"type": "stop", "error": "no LLM configured"}
 
         image = screenshot if (screenshot and len(screenshot) <= MAX_IMAGE_BYTES) else None
+        if self.vision_disabled:
+            image = None
         if screenshot and image is None:
             logger.debug(
                 "Screenshot too large for vision input (%d bytes); using DOM only.",
@@ -241,6 +268,7 @@ class LLMPlanner:
             goal=goal or "(unspecified)",
             url=url or "(unknown)",
             vision_note=VISION_NOTE if image else NO_VISION_NOTE,
+            history=_format_history(history),
             nodes=_format_nodes(nodes),
         )
 
@@ -248,16 +276,32 @@ class LLMPlanner:
         # model, so a cheap local text model can be paired with a VLM.
         target = extractor.vision_model if image else None
         raw_text = await extractor._call_with_retries(prompt, image, target)
+        if raw_text is None and image is not None:
+            # The vision model failed or cannot take images. Planning from the
+            # element list with the text model still works, so fall back
+            # instead of ending the task.
+            logger.warning(
+                "Vision planning with %s failed; continuing with DOM-only planning on %s.",
+                target, extractor.model,
+            )
+            self.vision_disabled = True
+            prompt = PLANNER_PROMPT.format(
+                goal=goal or "(unspecified)",
+                url=url or "(unknown)",
+                vision_note=NO_VISION_NOTE,
+                history=_format_history(history),
+                nodes=_format_nodes(nodes),
+            )
+            raw_text = await extractor._call_with_retries(prompt, None, None)
         if raw_text is None:
-            return {"type": "stop"}
+            return {"type": "stop", "error": "LLM call failed"}
 
         data = extractor._loads(raw_text)
         if isinstance(data, list) and data:
             data = data[0]
-        if not isinstance(data, dict):
-            # Some models wrap the action in {"action": {...}}.
-            inner = data.get("action") if isinstance(data, dict) else None
-            data = inner if isinstance(inner, dict) else data
+        # Some models wrap the action in {"action": {...}}.
+        if isinstance(data, dict) and "type" not in data and isinstance(data.get("action"), dict):
+            data = data["action"]
 
         action = normalise_action(data, nodes)
         logger.debug("LLM planner chose %s", action.get("type"))
