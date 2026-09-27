@@ -827,7 +827,20 @@ class TestNeo4jAdapter:
             {"name": "OpenAI", "entity_type": "org"}, {"name": ""}, "junk",
         ])) == 1
         assert any(":MENTIONS" in q for q, _ in sink["cypher"])
-        assert any(p.get("type") == "ORG" for _q, p in sink["cypher"])
+        entities = next(p["entities"] for _q, p in sink["cypher"] if "entities" in p)
+        assert entities == [{"name": "OpenAI", "type": "ORG"}]
+
+    def test_link_page_entities_binds_the_page_in_the_same_statement(self, neo4j):
+        # Variables do not carry across tx.run calls: a MENTIONS edge from a
+        # `p` bound in an earlier statement would hang off a phantom node.
+        adapter, sink = neo4j
+        run_async(adapter.link_page_entities("https://a.test/", [
+            {"name": "OpenAI"}, {"name": "Anthropic"},
+        ]))
+        linking = [q for q, _ in sink["cypher"] if ":MENTIONS" in q]
+        assert linking, "no MENTIONS statement was issued"
+        for query in linking:
+            assert "MERGE (p:Page" in query
 
     def test_neighbours_and_stats(self, neo4j):
         adapter, sink = neo4j

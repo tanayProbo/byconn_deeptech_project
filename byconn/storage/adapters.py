@@ -1177,22 +1177,25 @@ class Neo4jAdapter(BaseAdapter):
             return 0
 
         async def _txn(tx) -> None:
+            # One statement: Cypher variables do not survive across tx.run
+            # calls, so a page MERGEd in one statement and referenced as `p`
+            # in the next is unbound there, and MERGE would create a fresh
+            # anonymous node per entity instead of linking the real page.
             await tx.run(
-                f"MERGE (p:{page_label} {{url: $url}}) ON CREATE SET p.created_at = timestamp()",
+                f"""
+                MERGE (p:{page_label} {{url: $url}})
+                ON CREATE SET p.created_at = timestamp()
+                WITH p
+                UNWIND $entities AS item
+                MERGE (e:{entity_label} {{key: item.name}})
+                ON CREATE SET e.name = item.name, e.created_at = timestamp()
+                SET e.entity_type = item.type
+                MERGE (p)-[r:MENTIONS]->(e)
+                SET r.updated_at = timestamp()
+                """,
                 url=url,
+                entities=valid,
             )
-            for item in valid:
-                await tx.run(
-                    f"""
-                    MERGE (e:{entity_label} {{key: $name}})
-                    ON CREATE SET e.name = $name, e.created_at = timestamp()
-                    SET e.entity_type = $type
-                    MERGE (p)-[r:MENTIONS]->(e)
-                    SET r.updated_at = timestamp()
-                    """,
-                    name=item["name"],
-                    type=item["type"],
-                )
 
         async with self._require_driver().session(database=self.database) as session:
             await session.execute_write(_txn)
