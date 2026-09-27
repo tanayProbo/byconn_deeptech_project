@@ -37,6 +37,7 @@ import re
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
+from . import structured
 from .entity_extractor import EntityExtractor
 
 logger = logging.getLogger("byconnx.pipeline.llm_extractor")
@@ -49,6 +50,8 @@ DEFAULT_CACHE_SIZE = 256
 # Parallel page workers would otherwise fire requests in bursts and trip
 # free-tier rate limits (HTTP 429), which the backoff then pays for.
 DEFAULT_MAX_CONCURRENCY = 4
+# Windows of a long page sent for structured extraction; bounds cost per page.
+DEFAULT_MAX_WINDOWS = 4
 
 # Defaults per provider. The openai branch covers every OpenAI-compatible
 # endpoint; local servers get a small open-weights model, hosted gets a cheap
@@ -215,6 +218,7 @@ class LLMExtractor(EntityExtractor):
         )
         self._cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         self.cache_hits = 0
+        self.max_windows = _env_int("LLM_MAX_WINDOWS", DEFAULT_MAX_WINDOWS)
         self._max_concurrency = max_concurrency or _env_int("LLM_MAX_CONCURRENCY", DEFAULT_MAX_CONCURRENCY)
         # Created lazily: a semaphore binds to the loop that first uses it.
         self._semaphore: Optional[asyncio.Semaphore] = None
@@ -426,6 +430,103 @@ class LLMExtractor(EntityExtractor):
             while len(self._cache) > self.cache_size:
                 self._cache.popitem(last=False)
         return result
+
+    async def extract_structured(
+        self,
+        text_content: str,
+        instruction: str = "",
+        schema: Optional[Dict[str, Any]] = None,
+        url: str = "",
+    ) -> Dict[str, Any]:
+        """Extracts data matching ``schema``, with a verified quote per value.
+
+        Returns ``{"data", "citations", "unverified", "schema_errors",
+        "windows", "windows_skipped"}``. Quotes are checked against the page
+        text in code (see :func:`~byconn.pipeline.structured.verify_citations`),
+        so a value the model invented shows up in ``unverified`` instead of
+        being passed off as sourced. Long pages are split into windows whose
+        results are merged. Never raises: failures yield an empty result.
+        """
+        schema = schema or structured.DEFAULT_SCHEMA
+        text = (text_content or "").strip()
+        if not text or not self.is_available:
+            return {**structured.empty_structured(), "windows": 0, "windows_skipped": 0}
+
+        all_windows = structured.split_windows(
+            text, self.max_input_tokens, self.count_tokens, max_windows=10_000,
+        )
+        windows = all_windows[: self.max_windows]
+        parts = await asyncio.gather(*(
+            self._extract_window(window, text, instruction, schema, url) for window in windows
+        ))
+        merged = structured.merge_structured(parts)
+        if len(windows) > 1:
+            # Merging can break constraints each window satisfied (maxItems...).
+            merged["schema_errors"] = structured.schema_errors(merged["data"], schema)
+        merged["windows"] = len(windows)
+        merged["windows_skipped"] = len(all_windows) - len(windows)
+        return merged
+
+    async def _extract_window(
+        self,
+        window: str,
+        page_text: str,
+        instruction: str,
+        schema: Dict[str, Any],
+        url: str,
+    ) -> Dict[str, Any]:
+        """Runs one window: call, validate, retry once on schema errors, verify."""
+        prompt = structured.build_prompt(window, instruction, schema, url)
+        key = "structured|" + self._cache_key(prompt)
+        cached = self._cache.get(key)
+        if cached is not None:
+            self._cache.move_to_end(key)
+            self.cache_hits += 1
+            return copy.deepcopy(cached)
+
+        data, raw_citations, errors = await self._structured_call(prompt, schema)
+        if errors and data is not None:
+            retry_prompt = (
+                prompt
+                + "\n\nYour previous reply did not match the schema:\n- "
+                + "\n- ".join(errors)
+                + "\nReply again with corrected JSON only."
+            )
+            retry_data, retry_citations, retry_errors = await self._structured_call(retry_prompt, schema)
+            if retry_data is not None and len(retry_errors) <= len(errors):
+                data, raw_citations, errors = retry_data, retry_citations, retry_errors
+        if data is None:
+            return structured.empty_structured()
+
+        citations, unverified = structured.verify_citations(data, raw_citations, page_text, url)
+        result = {
+            "data": data,
+            "citations": citations,
+            "unverified": unverified,
+            "schema_errors": errors,
+        }
+        if self.cache_size and structured.leaf_pointers(data):
+            self._cache[key] = copy.deepcopy(result)
+            while len(self._cache) > self.cache_size:
+                self._cache.popitem(last=False)
+        return result
+
+    async def _structured_call(self, prompt: str, schema: Dict[str, Any]) -> tuple:
+        """One provider call. Returns ``(data, raw_citations, schema_errors)``;
+        ``data`` is None when the reply was unusable."""
+        async with self._limiter():
+            raw = await self._call_with_retries(prompt)
+        if raw is None:
+            return None, {}, []
+        parsed = self._loads(raw)
+        if not isinstance(parsed, dict):
+            logger.warning("Structured reply was not a JSON object.")
+            return None, {}, []
+        # Tolerate a bare data object without the {"data", "citations"} wrapper.
+        data = parsed.get("data") if "data" in parsed else parsed
+        if not isinstance(data, dict):
+            return None, {}, []
+        return data, parsed.get("citations") or {}, structured.schema_errors(data, schema)
 
     def _cache_key(self, prompt: str) -> str:
         """Keys a result on everything that determines it."""
@@ -686,17 +787,61 @@ class LLMExtractor(EntityExtractor):
         return None
 
     @staticmethod
-    def _repair(candidate: str) -> Optional[str]:
-        """Applies conservative repairs for common open-model JSON mistakes."""
-        # Trailing commas before a closing brace/bracket.
-        repaired = re.sub(r",\s*([}\]])", r"\1", candidate)
-        # Unquoted object keys: {name: "x"} -> {"name": "x"}
-        repaired = re.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_\- ]*)\s*:", r'\1"\2":', repaired)
-        # Python literals: True/False/None -> true/false/null
-        repaired = re.sub(r"\bTrue\b", "true", repaired)
-        repaired = re.sub(r"\bFalse\b", "false", repaired)
-        repaired = re.sub(r"\bNone\b", "null", repaired)
-        return repaired
+    def _split_strings(text: str) -> List[tuple]:
+        """Splits text into ``(is_string_literal, segment)`` runs.
+
+        Single- and double-quoted literals are recognised, with escapes, so a
+        repair can be applied to the JSON structure without touching values.
+        """
+        runs: List[tuple] = []
+        start = 0
+        index = 0
+        while index < len(text):
+            char = text[index]
+            if char in ('"', "'"):
+                if index > start:
+                    runs.append((False, text[start:index]))
+                end = index + 1
+                while end < len(text):
+                    if text[end] == "\\":
+                        end += 2
+                        continue
+                    if text[end] == char:
+                        break
+                    end += 1
+                runs.append((True, text[index:end + 1]))
+                index = start = end + 1
+                continue
+            index += 1
+        if start < len(text):
+            runs.append((False, text[start:]))
+        return runs
+
+    @classmethod
+    def _repair(cls, candidate: str) -> Optional[str]:
+        """Applies conservative repairs for common open-model JSON mistakes.
+
+        Repairs touch only text outside string literals. Applied to the whole
+        text, the unquoted-key fix also rewrote values: a summary containing
+        "Note, time: 5pm" became "Note,"time": 5pm" and the JSON was lost.
+        """
+        out = []
+        for is_string, segment in cls._split_strings(candidate):
+            if not is_string:
+                # Trailing commas before a closing brace/bracket.
+                segment = re.sub(r",\s*([}\]])", r"\1", segment)
+                # Unquoted object keys: {name: "x"} -> {"name": "x"}
+                segment = re.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_\-]*)\s*:", r'\1"\2":', segment)
+                # Python literals: True/False/None -> true/false/null
+                segment = re.sub(r"\bTrue\b", "true", segment)
+                segment = re.sub(r"\bFalse\b", "false", segment)
+                segment = re.sub(r"\bNone\b", "null", segment)
+            elif segment.startswith("'") and segment.endswith("'") and len(segment) >= 2:
+                # Python-style 'text' -> JSON "text".
+                inner = segment[1:-1].replace("\\'", "'")
+                segment = json.dumps(inner)
+            out.append(segment)
+        return "".join(out)
 
     @classmethod
     def _loads(cls, raw: str) -> Any:
