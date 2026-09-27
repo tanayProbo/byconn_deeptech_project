@@ -402,6 +402,9 @@ class TestBaseCrawlerWorkerLoop:
             crawler = BaseCrawler(
                 request_queue=queue, browser_pool=pool,
                 session_pool=SessionPool(), concurrency=1,
+                # Hermetic: the real memory check throttled this test for
+                # minutes whenever the host was above 85% RAM.
+                max_memory_percent=101,
             )
             handled = []
 
@@ -483,7 +486,8 @@ class TestBaseCrawlerWorkerResilience:
             await queue.add(CrawlRequest("https://a.test/"))
             crawler = BaseCrawler(
                 request_queue=queue, browser_pool=pool,
-                session_pool=SessionPool(), concurrency=1, **kwargs,
+                session_pool=SessionPool(), concurrency=1,
+                max_memory_percent=101, **kwargs,
             )
             await crawler.run(handler)
             # Before the fix this hung forever: the worker died holding the lock.

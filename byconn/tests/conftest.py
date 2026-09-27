@@ -78,8 +78,9 @@ def server_app(monkeypatch, fake_embedder):
 
     monkeypatch.setattr(server_module, "load_robots", _no_robots)
 
-    pytest.importorskip("fastapi")
-    starlette_testclient = pytest.importorskip("fastapi.testclient")
+    # Imported, not importorskip'd: a missing httpx used to skip every API
+    # test silently, so a broken install still looked green.
+    import fastapi.testclient as starlette_testclient
     return server_module.app, starlette_testclient.TestClient
 
 
