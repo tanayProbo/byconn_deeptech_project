@@ -1049,16 +1049,31 @@ class Neo4jAdapter(BaseAdapter):
         self.password = password or _env_str("NEO4J_PASSWORD", DEFAULT_NEO4J_PASSWORD)
         self.database = database or _env_opt("NEO4J_DATABASE")
         self.max_connection_pool_size = max_connection_pool_size or _env_int("NEO4J_POOL_SIZE", 50)
+        self.max_retry_time = _env_float("NEO4J_MAX_RETRY_TIME", 5.0)
         self._driver = None
 
     # --- lifecycle ----------------------------------------------------------
     async def _connect(self) -> None:
         logger.info("Connecting to Neo4j at %s", self.uri)
-        self._driver = AsyncGraphDatabase.driver(
+        driver = AsyncGraphDatabase.driver(
             self.uri,
             auth=(self.user, self.password),
             max_connection_pool_size=self.max_connection_pool_size,
+            # The driver retries failed transactions for 30s by default, so
+            # each write to a down server stalled a crawl page for its whole
+            # step timeout. Fail fast and let the adapter's backoff apply.
+            max_transaction_retry_time=self.max_retry_time,
         )
+        try:
+            # Creating a driver opens no connection. Without this check the
+            # adapter reported "ready" for an unreachable server, and every
+            # later call waited out the driver's retries instead of failing
+            # fast under the connect backoff.
+            await driver.verify_connectivity()
+        except Exception:
+            await driver.close()
+            raise
+        self._driver = driver
         await self._ensure_constraints()
         logger.info("Neo4j driver ready and constraints ensured.")
 

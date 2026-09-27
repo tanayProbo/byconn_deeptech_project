@@ -774,6 +774,9 @@ class _FakeDriver:
         self.sink["database"] = database
         return _FakeSession(self.sink, database)
 
+    async def verify_connectivity(self):
+        return None
+
     async def close(self):
         self.closed = True
 
@@ -905,3 +908,47 @@ class TestNeo4jAdapter:
         adapter.database = "neo4j"
         run_async(adapter.upsert_page("https://a.test/"))
         assert sink["database"] == "neo4j"
+
+
+class TestNeo4jFailsFast:
+    """A down Neo4j used to be reported 'ready' and stall every write."""
+
+    def _patch_driver(self, monkeypatch, reachable):
+        from byconn.storage import adapters as module
+
+        made = []
+
+        class _Driver:
+            def __init__(self, uri, **kwargs):
+                self.kwargs = kwargs
+                self.closed = False
+                made.append(self)
+
+            async def verify_connectivity(self):
+                if not reachable:
+                    raise ConnectionRefusedError("neo4j down")
+
+            def session(self, database=None):
+                return _FakeSession({"cypher": []}, database)
+
+            async def close(self):
+                self.closed = True
+
+        monkeypatch.setattr(module.AsyncGraphDatabase, "driver", _Driver)
+        return made
+
+    def test_unreachable_server_fails_connect_and_backs_off(self, monkeypatch):
+        made = self._patch_driver(monkeypatch, reachable=False)
+        adapter = Neo4jAdapter()
+        with pytest.raises(ConnectionRefusedError):
+            run_async(adapter.connect())
+        assert made[0].closed and adapter._driver is None and not adapter.is_connected
+        # Within the backoff window the next call fails at once, with no new driver.
+        with pytest.raises(ConnectionError):
+            run_async(adapter.write_triple("a", "REL", "b"))
+        assert len(made) == 1
+
+    def test_driver_retry_time_is_bounded(self, monkeypatch):
+        made = self._patch_driver(monkeypatch, reachable=True)
+        run_async(Neo4jAdapter().connect())
+        assert made[0].kwargs["max_transaction_retry_time"] == 5.0
