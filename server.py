@@ -50,7 +50,7 @@ from byconn.core.link_discovery import (  # noqa: E402
 from byconn.core.request_queue import CrawlRequest, RequestQueue  # noqa: E402
 from byconn.core.session_pool import SessionPool  # noqa: E402
 from byconn.pipeline.cleaning import DataCleaner  # noqa: E402
-from byconn.pipeline.embedder import DocumentEmbedder  # noqa: E402
+from byconn.pipeline.embedder import DEFAULT_CHUNK_WORDS, DocumentEmbedder  # noqa: E402
 from byconn.pipeline.llm_extractor import LLMExtractor  # noqa: E402
 from byconn.storage.adapters import (  # noqa: E402
     Neo4jAdapter,
@@ -113,7 +113,8 @@ CRAWL_PAGE_CONCURRENCY = max(1, _env_int("CRAWL_PAGE_CONCURRENCY", 3))
 CRAWL_MAX_PAGES = max(1, _env_int("CRAWL_MAX_PAGES", 50))
 CRAWL_HEADLESS = _env_bool("CRAWL_HEADLESS", True)
 CRAWL_MAX_MEMORY_PERCENT = _env_float("CRAWL_MAX_MEMORY_PERCENT", 90.0)
-CHUNK_SIZE = max(100, _env_int("CHUNK_SIZE", 500))
+# Words per chunk; see DEFAULT_CHUNK_WORDS for why it must stay under ~190.
+CHUNK_SIZE = max(20, _env_int("CHUNK_SIZE", DEFAULT_CHUNK_WORDS))
 
 MAX_JOBS_RETAINED = max(1, _env_int("MAX_JOBS_RETAINED", 200))
 STARTUP_CONNECT_TIMEOUT = max(0.5, _env_float("STARTUP_CONNECT_TIMEOUT", 10.0))
@@ -668,6 +669,8 @@ async def run_agent_task(job: AgentJob) -> None:
                 agent = VisualBrowserAgent(page, llm_client=app.state.extractor)
                 job.succeeded = await agent.execute_task(job.task, max_steps=job.max_steps)
                 job.steps_taken = len(agent.history)
+                if not job.succeeded and agent.failure_reason:
+                    job.errors.append(f"agent did not reach the goal: {agent.failure_reason}")
             finally:
                 await context.close()
             if sniffer is not None:
