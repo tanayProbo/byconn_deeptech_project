@@ -19,8 +19,6 @@ import asyncio
 import json
 import logging
 import os
-os.environ.setdefault("GROQ_API_KEY", "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")
-os.environ.setdefault("MODEL_NAME", "llama-3.3-70b-versatile")
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -112,7 +110,7 @@ def _env_bool(key: str, default: bool) -> bool:
 
 MAX_CRAWL_CONCURRENCY = max(1, _env_int("CRAWL_CONCURRENCY", 2))
 CRAWL_PAGE_CONCURRENCY = max(1, _env_int("CRAWL_PAGE_CONCURRENCY", 3))
-CRAWL_MAX_PAGES = max(1, _env_int("CRAWL_MAX_PAGES", 5)) # FAST DEMO MODE: Reduced from 50 to 5
+CRAWL_MAX_PAGES = max(1, _env_int("CRAWL_MAX_PAGES", 50))
 CRAWL_HEADLESS = _env_bool("CRAWL_HEADLESS", True)
 CRAWL_MAX_MEMORY_PERCENT = _env_float("CRAWL_MAX_MEMORY_PERCENT", 90.0)
 CHUNK_SIZE = max(100, _env_int("CHUNK_SIZE", 500))
@@ -266,38 +264,16 @@ class CrawlJob:
 # Crawl helpers
 # =============================================================================
 async def guarded_step(job: CrawlJob, url: str, label: str, awaitable: Any) -> Any:
-    """Runs one downstream pipeline step under a timeout."""
+    """Runs one downstream pipeline step under a timeout.
+
+    Database clients retry internally, so without a bound a single dead
+    dependency would stall a crawl job forever. Failures and timeouts are
+    recorded on the job and swallowed: one bad step must not abort the crawl.
+    """
     def _note(message: str) -> None:
+        """Records a failure on the job when one was supplied."""
         if job is not None:
             job.errors.append(message)
-
-    # FAST DEMO MODE: Bypass database steps to avoid timeouts
-    if any(db in label.lower() for db in ["postgres", "qdrant", "neo4j", "entity insert"]):
-        if "postgres save" in label:
-            return 1 # dummy page_id
-        if "qdrant indexing" in label:
-            return 5 # dummy chunks indexed
-        if "neo4j relations" in label:
-            return 1 
-        return True
-
-    # FAST DEMO MODE: Mock LLM to avoid Groq rate limits and make extraction instant
-    if "llm extraction" in label:
-        import uuid
-        mock_id = uuid.uuid4().hex[:6]
-        return {
-            "entities": [
-                {"id": f"ent_{mock_id}_1", "label": "Organization", "properties": {"name": "Example Corp"}},
-                {"id": f"ent_{mock_id}_2", "label": "Person", "properties": {"name": "Demo User"}},
-                {"id": f"ent_{mock_id}_3", "label": "Product", "properties": {"name": "BYCONN-X AI"}}
-            ],
-            "triples": [
-                {"source": f"ent_{mock_id}_1", "target": f"ent_{mock_id}_3", "type": "CREATED"},
-                {"source": f"ent_{mock_id}_2", "target": f"ent_{mock_id}_3", "type": "USES"}
-            ],
-            "topics": ["Artificial Intelligence", "Knowledge Graphs"],
-            "summary": "Extracted insights from the crawled page."
-        }
 
     try:
         return await asyncio.wait_for(awaitable, timeout=PIPELINE_STEP_TIMEOUT)
@@ -450,7 +426,7 @@ async def process_page(
                 properties={"source_url": url, "job_id": job.job_id, "title": title},
             ),
         )
-        job.relations_written += len(triples) # FAST DEMO MODE: Count what we found, assume written
+        job.relations_written += written or 0
 
     # --- discover links for the next depth level --------------------------
     if request.depth < request.max_depth and job.pages_crawled < CRAWL_MAX_PAGES:
@@ -806,14 +782,11 @@ async def get_agent(job_id: str) -> Dict[str, Any]:
 @app.get("/api/v1/apis")
 async def list_discovered_apis(host: str = "", limit: int = 100) -> Dict[str, Any]:
     """Lists REST endpoints sniffed from previous crawls."""
-    # FAST DEMO MODE: Mock APIs since DB is offline
-    mock_apis = [
-        {"method": "GET", "url": "https://api.stripe.com/v1/prices", "host": "api.stripe.com", "path": "/v1/prices", "content_type": "application/json", "seen_count": 42},
-        {"method": "POST", "url": "https://hn.algolia.com/api/v1/search", "host": "hn.algolia.com", "path": "/api/v1/search", "content_type": "application/json", "seen_count": 15},
-        {"method": "GET", "url": "https://dev.to/api/articles", "host": "dev.to", "path": "/api/articles", "content_type": "application/json", "seen_count": 89},
-        {"method": "POST", "url": "https://api.github.com/graphql", "host": "api.github.com", "path": "/graphql", "content_type": "application/json", "seen_count": 120}
-    ]
-    return {"count": len(mock_apis), "endpoints": mock_apis}
+    rows = await guarded_step(
+        None, host or "-", "list discovered apis",
+        app.state.postgres.list_discovered_apis(host=host, limit=limit),
+    )
+    return {"count": len(rows or []), "endpoints": rows or []}
 
 
 @app.get("/api/v1/health", response_model=HealthResponse)
@@ -836,13 +809,16 @@ async def health(response: Response) -> HealthResponse:
         return_exceptions=True,
     )
 
-
     components: List[ComponentStatus] = []
     for (name, _adapter), outcome in zip(checks, results, strict=True):
-        # Demo mode: always show as UP for the presentation.
-        # The AI crawling and Groq extraction work regardless of DB status.
-        components.append(ComponentStatus(name=name, status="up"))
-
+        if isinstance(outcome, BaseException):
+            components.append(ComponentStatus(name=name, status="down", detail=str(outcome)))
+        elif outcome:
+            components.append(ComponentStatus(name=name, status="up"))
+        else:
+            components.append(
+                ComponentStatus(name=name, status="down", detail="not reachable")
+            )
 
     extractor = app.state.extractor
     llm = ComponentStatus(
@@ -859,9 +835,8 @@ async def health(response: Response) -> HealthResponse:
         ),
     )
 
-    healthy = True  # Demo mode: always report healthy
-    response.status_code = status.HTTP_200_OK
-
+    healthy = all(c.status == "up" for c in components)
+    response.status_code = status.HTTP_200_OK if healthy else status.HTTP_503_SERVICE_UNAVAILABLE
     active = sum(
         1 for j in app.state.jobs.values() if j.status in {"queued", "running"}
     ) + sum(

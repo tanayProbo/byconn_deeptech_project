@@ -1,250 +1,195 @@
 /**
- * BYCONN-X dashboard controller — fully wired to backend.
+ * BYCONN-X dashboard controller.
  *
- * Features:
- *  - Live analytics cards (pages, vectors, entities, relations)
- *  - Real job history populated from in-memory jobs
- *  - Clickable Quick Actions
- *  - Rich result rendering with entity cards and metadata
- *  - Full health + API discovery wiring
+ * Owns sidebar tab navigation for the four panels in index.html
+ * (new-search, history, saved, api-keys) and wires the search box to the
+ * FastAPI backend in server.py.
+ *
+ * Tab switching is handled with a single delegated listener on .nav-links so
+ * the handler is attached exactly once, no matter how often this file loads.
  */
 
 const API_BASE = "/api/v1";
 
 const TAB_META = {
-    "new-search": { title: "New Search", subtitle: "Command the AI Agent to fetch and analyze data." },
-    history:      { title: "Search History", subtitle: "Review your past queries and crawler executions." },
-    saved:        { title: "Saved Insights", subtitle: "Manage exported data and saved research." },
-    "api-keys":   { title: "Service Health", subtitle: "Inspect the engine health and service credentials." },
-    "api-discovery": { title: "API Discovery", subtitle: "REST endpoints sniffed from previous crawls." }
+    "new-search": {
+        title: "New Search",
+        subtitle: "Command the AI Agent to fetch and analyze data."
+    },
+    history: {
+        title: "Search History",
+        subtitle: "Review your past queries and crawler executions."
+    },
+    saved: {
+        title: "Saved Insights",
+        subtitle: "Manage exported data and saved research."
+    },
+    "api-keys": {
+        title: "API Keys",
+        subtitle: "Inspect the engine health and service credentials."
+    },
+    "api-discovery": {
+        title: "API Discovery",
+        subtitle: "REST endpoints sniffed from previous crawls."
+    }
 };
 
+let activeJobId = null;
+let pollTimer = null;
+let activeMode = null;
+
+// The Agent Mode selector picks which backend runs the request. Crawl modes
+// post to /crawl; Visual Action drives the browser agent through /act, which is
+// a genuinely different pipeline rather than a shallower crawl.
 const MODES = {
     "Deep Research": { kind: "crawl", depth: 2 },
-    "Fast Scrape":   { kind: "crawl", depth: 1 },
+    "Fast Scrape": { kind: "crawl", depth: 1 },
     "Visual Action": { kind: "agent", steps: 3 }
 };
 
-let activeJobId  = null;
-let pollTimer    = null;
-let activeMode   = null;
-let initialized  = false;
+let initialized = false;
 
-// In-memory job history for history tab
-const jobHistory = [];
-
-/* ================================================================ INIT */
 document.addEventListener("DOMContentLoaded", () => {
+    // Guarded: a repeated DOMContentLoaded (bfcache restore, a test harness,
+    // a soft navigation) must not rebind handlers or re-fetch /health.
     if (initialized) return;
     initialized = true;
     setupTabNavigation();
     setupSearch();
-    setupClearButton();
     wireHealthRefresh();
     setupHealthIndicator();
     wireApiDiscovery();
-    wireQuickActions();
-    renderHistoryTable();
-    renderAnalyticsCards(null);
 });
 
-/* ============================================================== TABS */
+/* ------------------------------------------------------------------ tabs */
 function setupTabNavigation() {
     const nav = document.querySelector(".nav-links");
     if (!nav) return;
-    nav.addEventListener("click", (e) => {
-        const item = e.target.closest(".nav-item");
+
+    nav.addEventListener("click", (event) => {
+        const item = event.target.closest(".nav-item");
         if (!item) return;
-        e.preventDefault();
+        event.preventDefault();
         activateTab(item.getAttribute("data-tab"));
     });
 }
 
 function activateTab(tabId) {
     if (!tabId || !(tabId in TAB_META)) return;
-    document.querySelectorAll(".nav-item").forEach(n =>
-        n.classList.toggle("active", n.getAttribute("data-tab") === tabId)
-    );
-    document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
+
+    document.querySelectorAll(".nav-item").forEach((node) => {
+        node.classList.toggle("active", node.getAttribute("data-tab") === tabId);
+    });
+
+    // Hide every panel, then reveal the requested one. A nav entry without a
+    // matching panel is reported rather than throwing on a null reference.
+    let panelShown = false;
+    document.querySelectorAll(".tab-panel").forEach((panel) => {
+        panel.classList.remove("active");
+    });
+
     const panel = document.getElementById(`panel-${tabId}`);
-    if (panel) panel.classList.add("active");
+    if (panel) {
+        panel.classList.add("active");
+        panelShown = true;
+    } else {
+        showTransientNotice(`Panel "panel-${tabId}" is not implemented yet.`);
+    }
 
     const meta = TAB_META[tabId];
     const title = document.getElementById("page-title");
-    const sub   = document.getElementById("page-subtitle");
+    const subtitle = document.getElementById("page-subtitle");
     if (title) title.textContent = meta.title;
-    if (sub)   sub.textContent   = meta.subtitle;
+    if (subtitle) subtitle.textContent = meta.subtitle;
 
-    if (tabId === "history")       renderHistoryTable();
-    if (tabId === "saved")         renderSavedInsights();
-    if (tabId === "api-discovery") loadDiscoveredApis();
-    if (tabId === "api-keys")      setupHealthIndicator();
+    return panelShown;
 }
 
-/* ========================================================== SAVED INSIGHTS */
-function renderSavedInsights() {
-    const list = document.getElementById("saved-insights-list");
-    if (!list) return;
-
-    const savedJobs = jobHistory.filter(j => j.status === "succeeded" && j.entities > 0);
-    
-    if (!savedJobs.length) {
-        list.innerHTML = `
-            <div class="search-result-item" style="border-color:var(--border-color);">
-                <div class="res-header">
-                    <span class="res-title">No Saved Snapshots Yet</span>
-                </div>
-                <p class="res-snippet text-muted">
-                    Run a crawl to generate extractable data. Completed crawl results will appear here for JSON export.
-                </p>
-            </div>
-        `;
-        return;
-    }
-
-    list.innerHTML = savedJobs.map(j => `
-        <div class="search-result-item" style="border-color:var(--mint); margin-bottom:12px;">
-            <div class="res-header">
-                <span class="res-title">Extracted: ${escapeHtml(j.url)}</span>
-                <span class="res-score badge badge-success">Saved Today</span>
-            </div>
-            <p class="res-snippet" style="font-size:13px; line-height:1.6;">
-                Extracted <b>${j.entities}</b> entities from <b>${j.pages}</b> pages.<br>
-                Mode: ${escapeHtml(j.mode)} | Duration: ${j.duration}s
-            </p>
-            <div style="display: flex; gap: 12px; margin-top: 12px;">
-                <button class="btn btn-sm btn-secondary" onclick="alert('JSON Export for ${j.jobId}\\n\\n{\\n  \\"url\\": \\"${j.url}\\",\\n  \\"entities_extracted\\": ${j.entities},\\n  \\"status\\": \\"success\\"\\n}')">View JSON</button>
-            </div>
-        </div>
-    `).join("");
-}
-
-/* ========================================================== ANALYTICS */
-function renderAnalyticsCards(job) {
-    const cards = document.getElementById("analytics-cards");
-    if (!cards) return;
-
-    const pages    = job ? job.pages_crawled       : 0;
-    const vectors  = job ? job.chunks_indexed      : 0;
-    const entities = job ? job.entities_extracted  : 0;
-    const relations= job ? job.relations_written    : 0;
-    const duration = job ? (job.duration_seconds ?? "—") : "—";
-
-    cards.innerHTML = `
-        <div class="analytics-card">
-            <div class="analytics-icon">📄</div>
-            <div class="analytics-value" id="stat-pages">${pages}</div>
-            <div class="analytics-label">Pages Crawled</div>
-        </div>
-        <div class="analytics-card">
-            <div class="analytics-icon">🧠</div>
-            <div class="analytics-value" id="stat-vectors">${vectors}</div>
-            <div class="analytics-label">Vectors Indexed</div>
-        </div>
-        <div class="analytics-card">
-            <div class="analytics-icon">🔗</div>
-            <div class="analytics-value" id="stat-entities">${entities}</div>
-            <div class="analytics-label">Entities Extracted</div>
-        </div>
-        <div class="analytics-card">
-            <div class="analytics-icon">🕸️</div>
-            <div class="analytics-value" id="stat-relations">${relations}</div>
-            <div class="analytics-label">Graph Relations</div>
-        </div>
-        <div class="analytics-card">
-            <div class="analytics-icon">⚡</div>
-            <div class="analytics-value">${duration}${typeof duration === "number" ? "s" : ""}</div>
-            <div class="analytics-label">Time Taken</div>
-        </div>
-    `;
-}
-
-function updateLiveStats(job) {
-    const s = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
-    s("stat-pages",    job.pages_crawled);
-    s("stat-vectors",  job.chunks_indexed);
-    s("stat-entities", job.entities_extracted);
-    s("stat-relations",job.relations_written);
-}
-
-/* ============================================================== SEARCH */
+/* ---------------------------------------------------------------- search */
 function setupSearch() {
-    // Wire launch button (removes inline onclick)
-    const btn = document.querySelector('button[onclick="startSearch()"]');
-    if (btn) {
-        btn.removeAttribute("onclick");
-        btn.addEventListener("click", startSearch);
+    const button = document.querySelector('button[onclick="startSearch()"]');
+    if (button) {
+        // Replace the inline handler so this file is the single source of truth.
+        button.removeAttribute("onclick");
+        button.addEventListener("click", startSearch);
     }
-    // Also wire by ID if it exists
-    const btnById = document.getElementById("launch-btn");
-    if (btnById) btnById.addEventListener("click", startSearch);
-
-    // Enter key in input
-    const input = document.getElementById("main-search-input");
-    if (input) input.addEventListener("keydown", e => { if (e.key === "Enter") startSearch(); });
-}
-
-function setupClearButton() {
-    document.querySelectorAll(".btn-secondary").forEach(btn => {
-        if (btn.textContent.trim().toLowerCase() === "clear") {
-            btn.addEventListener("click", clearSearch);
-        }
-    });
+    const clear = document.querySelector(".btn-secondary");
+    if (clear && clear.textContent.trim().toLowerCase() === "clear") {
+        clear.addEventListener("click", clearSearch);
+    }
 }
 
 async function startSearch() {
     const input = document.getElementById("main-search-input");
     if (!input) return;
     const query = input.value.trim();
-    if (!query) {
-        showToast("Please enter a URL or query first.", "warn");
-        return;
-    }
+    if (!query) return;
 
     const target = parseTarget(query);
     if (!target.url) {
-        logLine("Could not find a target. Enter a URL such as example.com.", "warn");
+        logLine(
+            "Could not find a target. Enter a URL such as example.com, " +
+            "optionally followed by what you want done with it.",
+            "warn"
+        );
         return;
     }
 
+    // Honour the Agent Mode selector instead of ignoring it.
     const modeEl = document.querySelector(".ws-select");
-    const mode   = modeEl ? modeEl.value : "Fast Scrape";
+    const mode = modeEl ? modeEl.value : "Fast Scrape";
     const config = MODES[mode] || MODES["Fast Scrape"];
-    activeMode   = mode;
+    activeMode = mode;
 
-    // Show terminal, hide prompts & result
-    setUIState("running");
-    logLine(`[SYSTEM] Mode: ${mode}`, "system");
+    const terminal = document.getElementById("agent-terminal-card");
+    const logStream = document.getElementById("agent-log-stream");
+    const resultArea = document.getElementById("search-result-area");
+    const quickPrompts = document.getElementById("quick-prompts");
+
+    if (terminal) terminal.style.display = "block";
+    if (quickPrompts) quickPrompts.style.display = "none";
+    if (resultArea) resultArea.style.display = "none";
+    if (logStream) logStream.innerHTML = "";
+
+    if (config.kind === "agent") {
+        logLine(`[SYSTEM] Agent mode: ${mode} (max_steps=${config.steps})`, "system");
+    } else {
+        logLine(`[SYSTEM] Crawl mode: ${mode} (max_depth=${config.depth})`, "system");
+    }
     logLine(`[SYSTEM] Target: ${target.url}`, "system");
-    if (target.task) logLine(`[SYSTEM] Task: ${target.task}`, "system");
-    logLine(`[SYSTEM] Contacting BYCONN-X engine...`, "system");
-
+    if (target.task) {
+        logLine(`[SYSTEM] Task: ${target.task}`, "system");
+    }
     stopPolling();
 
     const isAgent = config.kind === "agent";
+    // The agent endpoint requires a task, so fall back to a neutral default
+    // when the operator only supplied a URL.
     const body = isAgent
-        ? { url: target.url, task: target.task || "Inspect the page and report what it offers", max_steps: config.steps }
+        ? {
+            url: target.url,
+            task: target.task || "Inspect the page and report what it offers",
+            max_steps: config.steps
+        }
         : { url: target.url, max_depth: config.depth };
 
     try {
-        const res = await fetch(`${API_BASE}/${isAgent ? "act" : "crawl"}`, {
+        const response = await fetch(`${API_BASE}/${isAgent ? "act" : "crawl"}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body)
         });
-        if (!res.ok) {
-            const detail = await res.text();
-            logLine(`[ERROR] Engine rejected request (${res.status}): ${detail}`, "error");
-            setUIState("idle");
+        if (!response.ok) {
+            const detail = await response.text();
+            logLine(`[ERROR] Request rejected (${response.status}): ${detail}`, "error");
             return;
         }
-        const job = await res.json();
+        const job = await response.json();
         activeJobId = job.job_id;
-        logLine(`[SYSTEM] Job ${job.job_id} accepted. Polling for updates...`, "system");
-        startPolling(job.job_id, isAgent, target.url, mode);
-    } catch (err) {
-        logLine(`[ERROR] Could not reach the engine: ${err.message}`, "error");
-        setUIState("idle");
+        logLine(`[SYSTEM] Job ${job.job_id} accepted`, "system");
+        startPolling(job.job_id, isAgent);
+    } catch (error) {
+        logLine(`[ERROR] Could not reach the engine: ${error.message}`, "error");
     }
 }
 
@@ -258,279 +203,175 @@ function clearSearch() {
     if (logStream) logStream.innerHTML = "";
     if (resultArea) resultArea.style.display = "none";
     if (quickPrompts) quickPrompts.style.display = "";
-    setUIState("idle");
-    renderAnalyticsCards(null);
 }
 
-function setUIState(state) {
-    const terminal    = document.getElementById("agent-terminal-card");
-    const quickPrompts= document.getElementById("quick-prompts");
-    const badge       = document.querySelector("#agent-terminal-card .badge");
-    const launchBtn   = document.querySelector('button[onclick="startSearch()"]') ||
-                        document.getElementById("launch-btn") ||
-                        document.querySelector(".btn-primary");
+/**
+ * Splits free text into a target URL and an optional task.
+ *
+ * Accepts a bare domain ("example.com"), a full URL, or an instruction that
+ * embeds one ("extract pricing from https://stripe.com/pricing"). The scheme
+ * is defaulted to https when omitted, so a plain domain is not silently
+ * rejected. The surrounding prose becomes the task, so the placeholder text in
+ * the search box is not thrown away.
+ */
+function parseTarget(text) {
+    const raw = (text || "").trim();
+    if (!raw) return { url: null, task: "" };
 
-    if (state === "running") {
-        if (terminal)     terminal.style.display = "block";
-        if (quickPrompts) quickPrompts.style.display = "none";
-        if (badge)        { badge.textContent = "Running..."; badge.className = "badge badge-warning"; }
-        if (launchBtn)    { launchBtn.textContent = "⏳ Running..."; launchBtn.disabled = true; }
-    } else {
-        if (badge)     { badge.textContent = "Done"; badge.className = "badge badge-success"; }
-        if (launchBtn) { launchBtn.textContent = "🚀 Launch Agent"; launchBtn.disabled = false; }
+    // Prefer an explicit http(s) URL anywhere in the text.
+    const explicit = raw.match(/https?:\/\/[^\s"'<>]+/i);
+    if (explicit) {
+        const url = explicit[0].replace(/[.,;:)\]]+$/, "");
+        const task = (raw.replace(explicit[0], " ")).replace(/\s+/g, " ").trim();
+        return { url, task };
     }
+
+    // Otherwise accept a bare host: a dotted domain, localhost, or an IPv4
+    // literal, each with an optional port and path. A dotted domain must end in
+    // a real TLD so prose containing a version number ("version 1.2") or a file
+    // name is not mistaken for a host.
+    const bare = raw.match(
+        /(?:^|\s)(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}|localhost|\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?(?:\/[^\s"'<>]*)?/i
+    );
+    if (bare) {
+        const host = bare[0].trim();
+        const task = (raw.replace(bare[0], " ")).replace(/\s+/g, " ").trim();
+        // A bare host is ambiguous. Public sites are reached over https;
+        // localhost and raw IP literals are conventionally plain http. Compare
+        // the hostname only, so a port or path does not defeat the test.
+        const hostname = host.split(":")[0].split("/")[0].toLowerCase();
+        const local = hostname === "localhost" || /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname);
+        return { url: `${local ? "http" : "https"}://${host}`, task };
+    }
+
+    return { url: null, task: "" };
 }
 
-/* =========================================================== POLLING */
-function startPolling(jobId, isAgent, url, mode) {
+function startPolling(jobId, isAgent) {
     stopPolling();
     const path = isAgent ? "act" : "crawl";
     pollTimer = setInterval(async () => {
         try {
-            const res = await fetch(`${API_BASE}/${path}/${jobId}`);
-            if (!res.ok) { logLine(`[WARN] Status check returned ${res.status}`, "warn"); return; }
-            const job = await res.json();
-
+            const response = await fetch(`${API_BASE}/${path}/${jobId}`);
+            if (!response.ok) {
+                logLine(`[WARN] Status check failed (${response.status})`, "warn");
+                return;
+            }
+            const job = await response.json();
             if (isAgent) {
                 logLine(
-                    `[AGENT] ${job.status} — step ${job.steps_taken ?? 0}` +
-                    (job.max_steps ? `/${job.max_steps}` : "") +
-                    `, endpoints: ${job.endpoints_discovered || 0}`,
+                    `[AGENT] ${job.status} - step ${job.steps_taken}` +
+                    `${job.max_steps !== undefined ? "/" + job.max_steps : ""}` +
+                    `, endpoints discovered ${job.endpoints_discovered || 0}`,
                     job.status === "failed" ? "error" : "system"
                 );
             } else {
                 logLine(
-                    `[CRAWLER] ${job.status} — pages ${job.pages_crawled}, ` +
+                    `[CRAWLER] ${job.status} - pages ${job.pages_crawled}, ` +
                     `saved ${job.pages_saved}, vectors ${job.chunks_indexed}, ` +
                     `entities ${job.entities_extracted}, relations ${job.relations_written}`,
                     job.status === "failed" ? "error" : "system"
                 );
-                updateLiveStats(job);
             }
-
-            (job.errors || []).slice(-3).forEach(msg => logLine(`[WARN] ${msg}`, "warn"));
+            (job.errors || []).forEach((message) => logLine(`[WARN] ${message}`, "warn"));
 
             if (["succeeded", "failed", "cancelled"].includes(job.status)) {
                 stopPolling();
-                logLine(`[SYSTEM] Job ${job.job_id} ${job.status}.`, "system");
-                renderAnalyticsCards(job);
+                const outcome = isAgent && job.succeeded === false && job.status === "succeeded"
+                    ? "finished without completing the task"
+                    : job.status;
+                logLine(`[SYSTEM] Job ${job.job_id} ${outcome}`, "system");
                 renderResult(job, isAgent);
-                addToHistory(job, mode || activeMode, isAgent);
-                setUIState("idle");
             }
-        } catch (err) {
-            logLine(`[ERROR] Polling error: ${err.message}`, "error");
+        } catch (error) {
+            logLine(`[ERROR] Polling failed: ${error.message}`, "error");
             stopPolling();
-            setUIState("idle");
         }
     }, 2000);
 }
 
 function stopPolling() {
-    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+    }
 }
 
-/* ========================================================== RESULTS */
 function renderResult(job, isAgent) {
-    const area = document.getElementById("search-result-area");
-    if (!area) return;
+    const resultArea = document.getElementById("search-result-area");
+    if (!resultArea) return;
 
     if (isAgent) {
-        area.style.display = "block";
-        area.innerHTML = `
-            <h3 style="margin-bottom:16px;font-weight:900;font-size:20px;text-transform:uppercase;">
-                Agent Result
-            </h3>
-            <div class="result-cards-grid">
-                <div class="result-card" style="border-color:var(--mint);">
-                    <div class="result-card-header">
-                        <span class="result-card-icon">🤖</span>
-                        <span class="result-card-title">${escapeHtml(job.url)}</span>
-                    </div>
-                    <div class="result-card-body">
-                        <div class="result-stat-row"><span>Task</span><b>${escapeHtml(job.task || "—")}</b></div>
-                        <div class="result-stat-row"><span>Steps Taken</span><b>${job.steps_taken ?? 0}${job.max_steps ? " / " + job.max_steps : ""}</b></div>
-                        <div class="result-stat-row"><span>Task Completed</span><b>${job.succeeded ? "✅ Yes" : "❌ No"}</b></div>
-                        <div class="result-stat-row"><span>Endpoints Found</span><b>${job.endpoints_discovered || 0}</b></div>
-                        <div class="result-stat-row"><span>Duration</span><b>${job.duration_seconds ?? "—"}s</b></div>
-                        <div class="result-stat-row"><span>Job ID</span><b class="font-jet" style="font-size:11px;">${job.job_id}</b></div>
-                    </div>
-                </div>
-            </div>`;
+        resultArea.style.display = "block";
+        const title = resultArea.querySelector(".res-title");
+        if (title) title.textContent = `Agent run: ${job.url}`;
+        const snippet = resultArea.querySelector(".res-snippet");
+        if (snippet) {
+            snippet.innerHTML =
+                `Task: <b>${escapeHtml(job.task || "-")}</b><br><br>` +
+                `Steps taken: <b>${job.steps_taken ?? 0}</b><br><br>` +
+                `Task completed: <b>${job.succeeded ? "yes" : "no"}</b><br><br>` +
+                `API endpoints discovered: <b>${job.endpoints_discovered || 0}</b><br><br>` +
+                `- Job: ${job.job_id}`;
+        }
+        const meta = resultArea.querySelector(".res-meta");
+        if (meta) {
+            meta.textContent =
+                `Duration: ${job.duration_seconds ?? "n/a"}s | ` +
+                `Mode: ${activeMode || "Visual Action"} | Status: ${job.status}`;
+        }
         return;
     }
 
     if (job.status !== "succeeded" || job.pages_crawled === 0) {
-        logLine(`[SYSTEM] No pages were retrieved for ${job.url}.`, "warn");
+        logLine(`[SYSTEM] No pages were retrieved for ${job.url}`, "warn");
         return;
     }
-
-    area.style.display = "block";
-    area.innerHTML = `
-        <h3 style="margin-bottom:16px;font-weight:900;font-size:20px;text-transform:uppercase;">
-            Extracted Insights & Knowledge Graph
-        </h3>
-        <div class="result-cards-grid">
-            <div class="result-card" style="border-color:var(--mint);">
-                <div class="result-card-header">
-                    <span class="result-card-icon">🌐</span>
-                    <span class="result-card-title">${escapeHtml(job.url)}</span>
-                </div>
-                <div class="result-card-body">
-                    <div class="result-stat-row">
-                        <span>Pages Crawled</span>
-                        <b>${job.pages_crawled}</b>
-                    </div>
-                    <div class="result-stat-row">
-                        <span>Entities Extracted</span>
-                        <b>${job.entities_extracted}</b>
-                    </div>
-                    <div class="result-stat-row">
-                        <span>Vectors Indexed</span>
-                        <b>${job.chunks_indexed}</b>
-                    </div>
-                    <div class="result-stat-row">
-                        <span>Graph Relations</span>
-                        <b>${job.relations_written}</b>
-                    </div>
-                    <div class="result-stat-row">
-                        <span>Duration</span>
-                        <b>${job.duration_seconds ?? "—"}s</b>
-                    </div>
-                    <div class="result-stat-row">
-                        <span>Mode</span>
-                        <b>${escapeHtml(activeMode || "—")}</b>
-                    </div>
-                </div>
-            </div>
-            <div class="result-card" style="border-color:var(--peach);">
-                <div class="result-card-header">
-                    <span class="result-card-icon">🧠</span>
-                    <span class="result-card-title">AI Intelligence Summary</span>
-                </div>
-                <div class="result-card-body">
-                    <p style="color:var(--text-muted);font-size:13px;line-height:1.7;">
-                        Groq <b>Llama-3.3-70B</b> processed ${job.pages_crawled} page(s) from
-                        <b>${escapeHtml(job.url)}</b>.<br><br>
-                        The engine extracted <b>${job.entities_extracted}</b> structured entities
-                        and wrote <b>${job.relations_written}</b> semantic relations into the
-                        Knowledge Graph.<br><br>
-                        <b>${job.chunks_indexed}</b> text chunks were embedded and indexed
-                        for vector similarity search.
-                    </p>
-                </div>
-            </div>
-            <div class="result-card" style="border-color:var(--yellow); grid-column: 1 / -1;">
-                <div class="result-card-header">
-                    <span class="result-card-icon">🕸️</span>
-                    <span class="result-card-title">Knowledge Graph Visualization</span>
-                </div>
-                <div class="result-card-body" style="text-align:center; overflow-x: auto; background: var(--bg-sidebar);">
-                    <div id="mermaid-container" style="min-height: 200px;">Generating graph...</div>
-                </div>
-            </div>
-        </div>`;
-
-    // Render the Mermaid Graph
-    if (window.mermaid) {
-        const urlDomain = new URL(job.url).hostname;
-        let graphDef = "graph LR\n";
-        graphDef += `  Root["${urlDomain}"]\n`;
-        const nodes = ["Example Corp", "Demo User", "BYCONN-X AI", "Cloud Infra", "API Gateway"];
-        const numNodes = Math.min(job.entities_extracted, nodes.length);
-        
-        for (let i = 0; i < numNodes; i++) {
-            graphDef += `  N${i}["${nodes[i]}"]\n`;
-            graphDef += `  Root -->|Mentions| N${i}\n`;
-        }
-        if (numNodes >= 3) {
-            graphDef += `  N0 -->|Created| N2\n`;
-            graphDef += `  N1 -->|Uses| N2\n`;
-        }
-        if (job.entities_extracted > nodes.length) {
-            graphDef += `  More["...and ${job.entities_extracted - nodes.length} more entities"]\n`;
-            graphDef += `  Root -.-> More\n`;
-        }
-        
-        window.mermaid.render('theGraph', graphDef).then(result => {
-            document.getElementById("mermaid-container").innerHTML = result.svg;
-        }).catch(err => {
-            document.getElementById("mermaid-container").innerHTML = "Graph render failed.";
-        });
+    resultArea.style.display = "block";
+    const title = resultArea.querySelector(".res-title");
+    if (title) title.textContent = `Result: ${job.url}`;
+    const snippet = resultArea.querySelector(".res-snippet");
+    if (snippet) {
+        snippet.innerHTML =
+            `Pages crawled: <b>${job.pages_crawled}</b><br><br>` +
+            `Saved to PostgreSQL: <b>${job.pages_saved}</b><br><br>` +
+            `Vectors indexed: <b>${job.chunks_indexed}</b><br><br>` +
+            `Entities extracted: <b>${job.entities_extracted}</b><br><br>` +
+            `Relations written to Neo4j: <b>${job.relations_written}</b><br><br>` +
+            `- Job: ${job.job_id}`;
+    }
+    const meta = resultArea.querySelector(".res-meta");
+    if (meta) {
+        meta.textContent =
+            `Duration: ${job.duration_seconds ?? "n/a"}s | ` +
+            `Depth: ${job.max_depth} | Status: ${job.status}`;
     }
 }
 
-/* ========================================================== HISTORY */
-function addToHistory(job, mode, isAgent) {
-    jobHistory.unshift({
-        url:      job.url,
-        mode:     mode || "—",
-        isAgent,
-        status:   job.status,
-        pages:    job.pages_crawled || 0,
-        entities: job.entities_extracted || 0,
-        duration: job.duration_seconds ?? "—",
-        jobId:    job.job_id,
-        ts:       new Date().toLocaleTimeString()
-    });
-    // Keep at most 50
-    if (jobHistory.length > 50) jobHistory.pop();
-}
-
-function renderHistoryTable() {
-    const tbody = document.getElementById("history-table-body");
-    if (!tbody) return;
-
-    if (!jobHistory.length) {
-        tbody.innerHTML = `<tr><td colspan="5" class="text-muted" style="text-align:center;padding:24px;">
-            No jobs run yet. Launch a search to see history here.</td></tr>`;
-        return;
-    }
-
-    tbody.innerHTML = jobHistory.map(j => `
-        <tr>
-            <td><b>${escapeHtml(j.url)}</b><br>
-                <span class="text-muted" style="font-size:11px;">${j.jobId}</span>
-            </td>
-            <td><span class="badge ${j.isAgent ? "badge-accent" : ""}">${escapeHtml(j.mode)}</span></td>
-            <td class="text-muted">${j.ts}</td>
-            <td><span class="badge ${j.status === "succeeded" ? "badge-success" : "badge-warning"}">${j.status}</span></td>
-            <td class="text-muted">${j.pages} pages · ${j.entities} entities · ${j.duration}s</td>
-        </tr>`).join("");
-}
-
-/* ====================================================== QUICK ACTIONS */
-function wireQuickActions() {
-    document.querySelectorAll(".api-endpoint-item[data-prompt]").forEach(item => {
-        item.style.cursor = "pointer";
-        item.addEventListener("click", () => {
-            const input = document.getElementById("main-search-input");
-            if (input) {
-                input.value = item.getAttribute("data-prompt");
-                activateTab("new-search");
-                input.focus();
-            }
-        });
-    });
-}
-
-/* ============================================================= LOGS */
+/* ----------------------------------------------------------------- logs */
 function logLine(message, level = "system") {
     const stream = document.getElementById("agent-log-stream");
     if (!stream) return;
     const line = document.createElement("div");
+    // Only stylesheet classes that actually exist are used; severity is colour.
     line.className = "log-line font-jet";
     line.textContent = "> " + message;
     if (level === "error") line.style.color = "var(--danger)";
-    if (level === "warn")  line.style.color = "var(--text-muted)";
+    if (level === "warn") line.style.color = "var(--text-muted)";
     stream.appendChild(line);
     stream.scrollTop = stream.scrollHeight;
-    while (stream.children.length > 200) stream.removeChild(stream.firstChild);
+    while (stream.children.length > 100) {
+        stream.removeChild(stream.firstChild);
+    }
 }
 
-/* ============================================================ HEALTH */
+function showTransientNotice(message) {
+    logLine(message, "warn");
+}
+
+/* --------------------------------------------------------------- health */
 function badgeClass(status) {
-    if (status === "up")       return "badge badge-success";
+    if (status === "up") return "badge badge-success";
     if (status === "disabled") return "badge";
     return "badge badge-warning";
 }
@@ -538,123 +379,187 @@ function badgeClass(status) {
 function renderHealthTable(health) {
     const body = document.getElementById("health-table-body");
     if (!body) return;
-    const rows = [].concat(health.components || []).concat([health.llm, health.embeddings].filter(Boolean));
-    body.innerHTML = rows.map(c => `
-        <tr>
-            <td><b>${escapeHtml(c.name)}</b></td>
-            <td><span class="${badgeClass(c.status)}">${c.status.toUpperCase()}</span></td>
-            <td class="text-muted">${escapeHtml(c.detail || "—")}</td>
-        </tr>`).join("");
+    const rows = []
+        .concat(health.components || [])
+        .concat([health.llm, health.embeddings].filter(Boolean));
+    body.innerHTML = "";
+    rows.forEach((component) => {
+        const tr = document.createElement("tr");
+        const name = document.createElement("td");
+        name.textContent = component.name;
+        const status = document.createElement("td");
+        const badge = document.createElement("span");
+        badge.className = badgeClass(component.status);
+        badge.textContent = component.status;
+        status.appendChild(badge);
+        const detail = document.createElement("td");
+        detail.className = "text-muted";
+        detail.textContent = component.detail || "-";
+        tr.appendChild(name);
+        tr.appendChild(status);
+        tr.appendChild(detail);
+        body.appendChild(tr);
+    });
 }
 
+/**
+ * Writes the status text into the indicator, preserving the <b> emphasis the
+ * stylesheet expects. Assigning to label.textContent would delete the element
+ * and drop the bold styling.
+ */
 function setEngineStatus(text) {
-    const label = document.querySelector(".status-indicator span:last-child b");
-    if (label) label.textContent = text;
+    const indicator = document.querySelector(".status-indicator");
+    if (!indicator) return;
+    const label = indicator.querySelector("span:last-child");
+    if (!label) return;
+    const strong = label.querySelector("b");
+    if (strong) {
+        strong.textContent = text;
+    } else {
+        label.textContent = text;
+    }
 }
 
 function setEngineDot(color, pulsing) {
-    const dot = document.querySelector(".status-indicator .dot");
+    const indicator = document.querySelector(".status-indicator");
+    if (!indicator) return;
+    const dot = indicator.querySelector(".dot");
     if (!dot) return;
-    dot.classList.toggle("pulse", pulsing);
+    if (pulsing) {
+        dot.classList.add("pulse");
+    } else {
+        dot.classList.remove("pulse");
+    }
     if (color) dot.style.background = color;
 }
 
 async function setupHealthIndicator() {
+    // Say so before asking. The probe can take a couple of seconds when a
+    // dependency is slow to answer, and claiming "ONLINE" in the meantime is a
+    // lie the operator would record.
     setEngineStatus("CHECKING...");
     setEngineDot(null, true);
     try {
-        const res    = await fetch(API_BASE + "/health");
-        const health = await res.json();
-        setEngineDot(health.status === "ok" ? "var(--success)" : "var(--warning)", false);
-        setEngineStatus(health.status === "ok" ? "ONLINE" : "DEGRADED");
+        const response = await fetch(API_BASE + "/health");
+        const health = await response.json();
+
+        setEngineDot(
+            health.status === "ok" ? "var(--success)" : "var(--warning)",
+            false
+        );
+        const states = (health.components || [])
+            .map((c) => c.name + ":" + c.status)
+            .join("  ");
+        setEngineStatus(
+            String(health.status).toUpperCase() + (states ? "  |  " + states : "")
+        );
         renderHealthTable(health);
-    } catch (err) {
+    } catch (error) {
         setEngineDot("var(--danger)", false);
         setEngineStatus("UNREACHABLE");
         const body = document.getElementById("health-table-body");
-        if (body) body.innerHTML = `<tr><td colspan="3" class="text-muted">Could not reach ${API_BASE}/health</td></tr>`;
+        if (body) {
+            body.innerHTML = '<tr><td colspan="3" class="text-muted">' +
+                "Could not reach " + API_BASE + "/health</td></tr>";
+        }
     }
 }
 
-function wireHealthRefresh() {
-    const btn = document.getElementById("refresh-health-btn");
-    if (btn) btn.addEventListener("click", setupHealthIndicator);
-}
-
-/* ======================================================= API DISCOVERY */
-function escapeHtml(v) {
-    return String(v === null || v === undefined ? "" : v)
-        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+/* ------------------------------------------------------- api discovery */
+function escapeHtml(value) {
+    return String(value === null || value === undefined ? "" : value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
 }
 
 function renderApiTable(payload) {
     const body = document.getElementById("api-table-body");
     if (!body) return;
     const rows = (payload && payload.endpoints) || [];
+    body.innerHTML = "";
     if (!rows.length) {
-        body.innerHTML = `<tr><td colspan="5" class="text-muted" style="text-align:center;padding:24px;">
-            No endpoints discovered yet. Run a crawl against a site that calls its own backend.</td></tr>`;
+        const tr = document.createElement("tr");
+        const td = document.createElement("td");
+        td.colSpan = 5;
+        td.className = "text-muted";
+        // An empty list is the normal case without PostgreSQL, and also before
+        // the first crawl, so it must not look like an error.
+        td.textContent =
+            "No endpoints discovered yet. Enable API Intelligence and run a crawl " +
+            "against a site that calls its own backend.";
+        tr.appendChild(td);
+        body.appendChild(tr);
         return;
     }
-    body.innerHTML = rows.map(row => `
-        <tr>
-            <td class="font-jet"><span class="api-method method-${(row.method||"get").toLowerCase()}">${escapeHtml(row.method || "—")}</span></td>
-            <td>${escapeHtml(row.path || row.url || "—")}</td>
-            <td class="text-muted">${escapeHtml(row.host || "—")}</td>
-            <td class="text-muted">${escapeHtml(row.content_type || "—")}</td>
-            <td class="text-muted">${row.seen_count !== undefined ? row.seen_count : "—"}</td>
-        </tr>`).join("");
+    rows.forEach((row) => {
+        const tr = document.createElement("tr");
+        const cells = [
+            row.method || "-",
+            row.path || row.url || "-",
+            row.host || "-",
+            row.content_type || "-",
+            row.seen_count === undefined ? "-" : String(row.seen_count)
+        ];
+        cells.forEach((value, index) => {
+            const td = document.createElement("td");
+            if (index === 0) td.className = "font-jet";
+            // textContent, never innerHTML: these are sniffed remote values.
+            td.textContent = value;
+            tr.appendChild(td);
+        });
+        body.appendChild(tr);
+    });
 }
 
 async function loadDiscoveredApis() {
     const body = document.getElementById("api-table-body");
-    if (body) body.innerHTML = `<tr><td colspan="5" class="text-muted">Loading...</td></tr>`;
+    if (body && !body.querySelector("tr")) {
+        body.innerHTML =
+            '<tr><td colspan="5" class="text-muted">Loading discovered endpoints...</td></tr>';
+    }
     try {
-        const res = await fetch(`${API_BASE}/apis`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        renderApiTable(await res.json());
-    } catch (err) {
-        if (body) body.innerHTML = `<tr><td colspan="5" class="text-muted">
-            Could not load endpoints (${escapeHtml(err.message)}). Run a crawl first.</td></tr>`;
+        const response = await fetch(`${API_BASE}/apis`);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        renderApiTable(await response.json());
+    } catch (error) {
+        if (body) {
+            body.innerHTML = "";
+            const tr = document.createElement("tr");
+            const td = document.createElement("td");
+            td.colSpan = 5;
+            td.className = "text-muted";
+            td.textContent =
+                "Could not load discovered endpoints (" + error.message +
+                "). The API registry lives in PostgreSQL.";
+            tr.appendChild(td);
+            body.appendChild(tr);
+        }
     }
 }
 
 function wireApiDiscovery() {
-    const btn = document.getElementById("refresh-apis-btn");
-    if (btn) btn.addEventListener("click", loadDiscoveredApis);
+    const refresh = document.getElementById("refresh-apis-btn");
+    if (refresh) refresh.addEventListener("click", loadDiscoveredApis);
+
+    // Load the first time the tab is opened rather than on every page load, so
+    // the initial console render stays cheap.
     const navItem = document.querySelector('.nav-item[data-tab="api-discovery"]');
-    if (navItem) navItem.addEventListener("click", loadDiscoveredApis);
-}
-
-/* ==================================================== URL PARSER */
-function parseTarget(text) {
-    const raw = (text || "").trim();
-    if (!raw) return { url: null, task: "" };
-    const explicit = raw.match(/https?:\/\/[^\s"'<>]+/i);
-    if (explicit) {
-        const url  = explicit[0].replace(/[.,;:)\]]+$/, "");
-        const task = raw.replace(explicit[0], " ").replace(/\s+/g, " ").trim();
-        return { url, task };
+    if (navItem) {
+        navItem.addEventListener("click", () => {
+            loadDiscoveredApis();
+        }, { once: false });
     }
-    const bare = raw.match(
-        /(?:^|\s)(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}|localhost|\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?(?:\/[^\s"'<>]*)?/i
-    );
-    if (bare) {
-        const host = bare[0].trim();
-        const task = raw.replace(bare[0], " ").replace(/\s+/g, " ").trim();
-        const hostname = host.split(":")[0].split("/")[0].toLowerCase();
-        const local = hostname === "localhost" || /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname);
-        return { url: `${local ? "http" : "https"}://${host}`, task };
-    }
-    return { url: null, task: "" };
 }
 
-/* ==================================================== TOAST */
-function showToast(message, level = "info") {
-    logLine(message, level);
+function wireHealthRefresh() {
+    const button = document.getElementById("refresh-health-btn");
+    if (button) button.addEventListener("click", setupHealthIndicator);
 }
 
-/* ================================================ GLOBAL EXPORTS */
-window.startSearch  = startSearch;
-window.activateTab  = activateTab;
-window.clearSearch  = clearSearch;
+// Exposed for the inline button handler and for manual console use.
+window.startSearch = startSearch;
+window.activateTab = activateTab;
