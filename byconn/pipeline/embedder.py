@@ -29,6 +29,12 @@ DEFAULT_DIMENSIONS = 384
 DEFAULT_LOCAL_MODEL = "all-MiniLM-L6-v2"          # natively 384-dim
 DEFAULT_OPENAI_MODEL = "text-embedding-3-small"   # 1536-dim, truncated via `dimensions`
 DEFAULT_BATCH_SIZE = 64
+# Words per chunk. all-MiniLM-L6-v2 truncates input at 256 word-pieces, and
+# English prose runs ~1.3 word-pieces per word, so 180 words is the largest
+# window whose tail still reaches the vector. At 500 words over half of every
+# chunk was silently dropped before embedding.
+DEFAULT_CHUNK_WORDS = 180
+DEFAULT_CHUNK_OVERLAP = 30
 
 
 def _env_str(key: str, default: str) -> str:
@@ -94,8 +100,8 @@ class DocumentEmbedder:
     def __init__(
         self,
         embedding_client: Any = None,
-        chunk_size: int = 500,
-        chunk_overlap: int = 50,
+        chunk_size: int = DEFAULT_CHUNK_WORDS,
+        chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
         provider: Optional[str] = None,
         model: Optional[str] = None,
         dimensions: Optional[int] = None,
@@ -245,7 +251,21 @@ class DocumentEmbedder:
             async with self._local_lock:
                 if self._local_model is None:
                     self._local_model = await asyncio.to_thread(self._load_local_model)
+                    self._warn_if_chunks_truncate(self._local_model)
         return self._local_model
+
+    def _warn_if_chunks_truncate(self, model: Any) -> None:
+        """Warns when chunks are wider than the model's input window."""
+        limit = getattr(model, "max_seq_length", None)
+        # ~1.3 word-pieces per English word.
+        if isinstance(limit, int) and self.chunk_size * 1.3 > limit:
+            logger.warning(
+                "chunk_size=%d words (~%d tokens) exceeds %s's %d-token input "
+                "window; the tail of every chunk will not be embedded. Lower "
+                "CHUNK_SIZE to about %d.",
+                self.chunk_size, int(self.chunk_size * 1.3), self.model, limit,
+                int(limit / 1.3),
+            )
 
     def _encode_local_sync(self, chunks: List[str]) -> List[List[float]]:
         """Blocking sentence-transformers encode, run off the event loop."""
