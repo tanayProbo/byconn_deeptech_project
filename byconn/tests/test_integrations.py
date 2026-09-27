@@ -608,6 +608,23 @@ class TestLLMPlanner:
         action = run_async(planner.plan("goal", NODES, ""))
         assert action["type"] == "stop" and action["error"] == "LLM call failed"
 
+    def test_failed_vision_call_falls_back_to_dom_planning(self, monkeypatch):
+        """A text-only model rejects screenshots; the agent must keep working."""
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        planner = LLMPlanner()
+        calls = []
+
+        def fake_call(prompt, image=None, model=None):
+            calls.append(image)
+            return _async_return(None if image else '{"type": "click", "id": 1}')
+
+        monkeypatch.setattr(planner.extractor, "_call_with_retries", fake_call)
+        first = run_async(planner.plan("goal", NODES, "", screenshot=b"png"))
+        assert first["type"] == "click" and calls == [b"png", None]
+        assert planner.vision_disabled is True
+        run_async(planner.plan("goal", NODES, "", screenshot=b"png"))
+        assert calls[2] is None  # no more screenshots once vision failed
+
     def test_wrapped_action_is_unwrapped(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "k")
         planner = LLMPlanner()
@@ -839,6 +856,60 @@ class TestVisualBrowserAgent:
     def _agent(self, planner, page=None):
         page = page or _StubPage()
         return VisualBrowserAgent(page, planner=planner, step_delay=0)
+
+    def test_planner_sees_what_it_already_did(self):
+        """Without history the agent clicked a working "Next" link three times."""
+        seen = []
+
+        class _Recorder:
+            async def plan(self, goal, nodes, url="", screenshot=None, history=None):
+                seen.append([dict(h) for h in history])
+                return {"type": "scroll", "delta": 10} if len(seen) == 1 else {"type": "stop"}
+
+        agent = self._agent(_Recorder())
+        assert run_async(agent.execute_task("g", max_steps=3)) is True
+        assert seen[0] == []
+        assert seen[1][0]["action"]["type"] == "scroll" and "url_after" in seen[1][0]
+
+    def test_history_is_rendered_into_the_prompt(self):
+        from byconn.visual_agent.planner import _format_history
+
+        text = _format_history([{"step": 1, "action": {"type": "click", "element_id": 42},
+                                 "url_before": "https://q.test/", "url_after": "https://q.test/page/2/"}])
+        assert "step 1: click id=42; page changed to https://q.test/page/2/" in text
+        assert _format_history([]) == "(none yet)"
+
+    def test_click_below_the_fold_scrolls_first(self):
+        """The planner picked the right link at y=1622 in a 720px viewport, and
+        the click landed off-screen: the agent could never click below the fold."""
+
+        class _TallPage(_StubPage):
+            viewport_size = {"width": 1280, "height": 720}
+            max_scroll = 2000
+
+            def __init__(self):
+                super().__init__()
+                self.scroll_y = 0
+
+            async def evaluate(self, script, arg=None):
+                if arg is None:
+                    return self.nodes
+                target = max(0, min(self.max_scroll, self.scroll_y + arg[1]))
+                moved, self.scroll_y = target - self.scroll_y, target
+                return [0, moved]
+
+        class _ClickThenStop:
+            calls = 0
+
+            async def plan(self, goal, nodes, url="", screenshot=None):
+                self.calls += 1
+                return {"type": "click", "x": 640, "y": 1622} if self.calls == 1 else {"type": "stop"}
+
+        page = _TallPage()
+        agent = self._agent(_ClickThenStop(), page)
+        assert run_async(agent.execute_task("next page", max_steps=3)) is True
+        assert page.scroll_y == 1622 - 360
+        assert page.mouse.clicks == [(640, 360)]
 
     def test_on_step_sees_every_step_and_cannot_break_the_task(self):
         class _ScrollThenStop:

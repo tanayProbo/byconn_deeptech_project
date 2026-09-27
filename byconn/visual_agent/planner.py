@@ -40,6 +40,9 @@ GOAL:
 
 CURRENT PAGE: {url}
 {vision_note}
+PREVIOUS ACTIONS (oldest first):
+{history}
+
 INTERACTABLE ELEMENTS (id, role, label, x, y):
 {nodes}
 
@@ -51,6 +54,8 @@ Rules:
 - Use "type" with a "value" when the goal requires entering text.
 - Use "scroll" to reach elements further down the page.
 - Use "stop" when the goal is already satisfied or no action can help.
+- Check the previous actions first: if one already achieved the goal (for
+  example the page changed as intended), reply "stop". Do not repeat it.
 """
 
 
@@ -64,6 +69,19 @@ def _format_nodes(nodes: Sequence[Dict[str, Any]]) -> str:
             f"label={label!r} x={node.get('x')} y={node.get('y')}"
         )
     return "\n".join(lines) if lines else "(no interactable elements found)"
+
+
+def _format_history(history: Optional[Sequence[Dict[str, Any]]]) -> str:
+    """Renders earlier steps with the page change each one caused."""
+    lines = []
+    for record in list(history or [])[-8:]:
+        action = record.get("action") or {}
+        target = f" id={action.get('element_id')}" if action.get("element_id") is not None else ""
+        value = f" value={action.get('value')!r}" if action.get("value") else ""
+        before, after = record.get("url_before"), record.get("url_after")
+        moved = f"; page changed to {after}" if after and after != before else "; page URL unchanged"
+        lines.append(f"- step {record.get('step')}: {action.get('type')}{target}{value}{moved}")
+    return "\n".join(lines) if lines else "(none yet)"
 
 
 def normalise_action(raw: Any, nodes: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
@@ -194,6 +212,9 @@ class LLMPlanner:
 
     def __init__(self, extractor: Any = None):
         self._extractor = extractor
+        # Set once a vision request fails (e.g. a text-only model rejects
+        # images); later steps then plan from the element list alone.
+        self.vision_disabled = False
 
     @property
     def extractor(self) -> Any:
@@ -223,6 +244,7 @@ class LLMPlanner:
         nodes: Sequence[Dict[str, Any]],
         url: str = "",
         screenshot: Optional[bytes] = None,
+        history: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Asks the model for the next action; falls back to ``stop`` on error.
 
@@ -234,6 +256,8 @@ class LLMPlanner:
             return {"type": "stop", "error": "no LLM configured"}
 
         image = screenshot if (screenshot and len(screenshot) <= MAX_IMAGE_BYTES) else None
+        if self.vision_disabled:
+            image = None
         if screenshot and image is None:
             logger.debug(
                 "Screenshot too large for vision input (%d bytes); using DOM only.",
@@ -244,6 +268,7 @@ class LLMPlanner:
             goal=goal or "(unspecified)",
             url=url or "(unknown)",
             vision_note=VISION_NOTE if image else NO_VISION_NOTE,
+            history=_format_history(history),
             nodes=_format_nodes(nodes),
         )
 
@@ -251,6 +276,23 @@ class LLMPlanner:
         # model, so a cheap local text model can be paired with a VLM.
         target = extractor.vision_model if image else None
         raw_text = await extractor._call_with_retries(prompt, image, target)
+        if raw_text is None and image is not None:
+            # The vision model failed or cannot take images. Planning from the
+            # element list with the text model still works, so fall back
+            # instead of ending the task.
+            logger.warning(
+                "Vision planning with %s failed; continuing with DOM-only planning on %s.",
+                target, extractor.model,
+            )
+            self.vision_disabled = True
+            prompt = PLANNER_PROMPT.format(
+                goal=goal or "(unspecified)",
+                url=url or "(unknown)",
+                vision_note=NO_VISION_NOTE,
+                history=_format_history(history),
+                nodes=_format_nodes(nodes),
+            )
+            raw_text = await extractor._call_with_retries(prompt, None, None)
         if raw_text is None:
             return {"type": "stop", "error": "LLM call failed"}
 
