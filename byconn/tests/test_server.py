@@ -537,3 +537,52 @@ class TestShutdown:
         assert app.state.postgres.connected is False
         assert app.state.qdrant.connected is False
         assert app.state.neo4j.connected is False
+
+
+class TestPipelineConcurrency:
+    """Independent per-page steps overlap instead of running back to back."""
+
+    def test_page_save_and_llm_extraction_overlap(self, client, monkeypatch):
+        state = client.app.state
+        extraction_started = asyncio.Event()
+        original_save = state.postgres.upsert_crawled_page
+        original_extract = state.extractor.extract_knowledge
+
+        async def save(**kwargs):
+            # Sequential steps would deadlock here: extraction only starts
+            # after the save returns, so the wait times out and nothing saves.
+            await asyncio.wait_for(extraction_started.wait(), timeout=2)
+            return await original_save(**kwargs)
+
+        async def extract(text):
+            extraction_started.set()
+            return await original_extract(text)
+
+        monkeypatch.setattr(state.postgres, "upsert_crawled_page", save)
+        monkeypatch.setattr(state.extractor, "extract_knowledge", extract)
+        job = poll_job(client, start_crawl(client, "https://example.com/", 0))
+        assert job["pages_saved"] == 1
+        assert job["entities_extracted"] == 2
+
+    def test_real_status_code_is_stored(self, client):
+        poll_job(client, start_crawl(client, "https://example.com/", 0))
+        # FakeCrawler performs no navigation, so no status is known: it must be
+        # stored as unknown rather than invented as 200.
+        assert client.app.state.postgres.pages[0].get("status_code") is None
+
+
+class TestSeedRobots:
+    def test_disallowed_seed_is_not_crawled(self, client, monkeypatch):
+        from urllib.robotparser import RobotFileParser
+
+        parser = RobotFileParser()
+        parser.parse(["User-agent: *", "Disallow: /"])
+
+        async def _robots(_base_url):
+            return parser
+
+        monkeypatch.setattr(server_module, "load_robots", _robots)
+        job = poll_job(client, start_crawl(client, "https://example.com/", 1))
+        assert job["status"] == "failed"
+        assert job["pages_crawled"] == 0
+        assert any("robots.txt disallows" in e for e in job["errors"])

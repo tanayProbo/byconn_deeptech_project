@@ -122,6 +122,11 @@ PIPELINE_STEP_TIMEOUT = max(1.0, _env_float("PIPELINE_STEP_TIMEOUT", 30.0))
 # Health must answer quickly, so probes get a much shorter budget than
 # startup; adapters also back off after a failure.
 HEALTH_PROBE_TIMEOUT = max(0.5, _env_float("HEALTH_PROBE_TIMEOUT", 2.0))
+# Upper bound on processing one page: two concurrent phases of pipeline steps
+# (the Neo4j phase runs three in sequence), plus slack for embedding.
+PAGE_HANDLER_TIMEOUT = max(
+    5.0, _env_float("PAGE_HANDLER_TIMEOUT", PIPELINE_STEP_TIMEOUT * 4 + 30)
+)
 DEDUPLICATE_PAGES = _env_bool("CRAWL_DEDUPLICATE", True)
 API_INTELLIGENCE = _env_bool("API_INTELLIGENCE", True)
 
@@ -350,35 +355,45 @@ async def process_page(
 
     text_for_analysis = markdown or html
 
-    # --- build chunk embeddings once, reused by Qdrant and PostgreSQL -----
+    # Chunking is cheap and synchronous; the page save needs the count.
     chunks: List[str] = []
-    embeddings: List[List[float]] = []
     try:
         chunks = app.state.embedder.split_into_chunks(markdown or html)
-        embeddings = await app.state.embedder.generate_dense_embeddings(chunks)
     except Exception as exc:
-        job.errors.append(f"{url}: chunking/embedding failed ({exc})")
+        job.errors.append(f"{url}: chunking failed ({exc})")
         logger.exception("Failed to chunk %s", url)
 
-    # --- persist the raw page in PostgreSQL (single write) ---------------
-    page_id = await guarded_step(
-        job, url, "postgres save",
-        app.state.postgres.upsert_crawled_page(
-            url=url,
-            markdown=html,
-            title=title,
-            job_id=job.job_id,
-            chunk_count=len(chunks),
-            status_code=200,
-            depth=request.depth,
-        ),
-    )
-    if page_id is not None:
-        job.pages_saved += 1
+    # The page save, vector indexing and LLM extraction are independent of
+    # one another, so they run concurrently: a page costs the slowest of the
+    # three (usually the LLM) rather than their sum. Every step still really
+    # runs; each is timed out and recorded by guarded_step as before.
+    async def save_page() -> Any:
+        return await guarded_step(
+            job, url, "postgres save",
+            app.state.postgres.upsert_crawled_page(
+                url=url,
+                markdown=html,
+                title=title,
+                job_id=job.job_id,
+                chunk_count=len(chunks),
+                # The real response status; None (stored as NULL) if unknown.
+                status_code=request.payload.get("status_code"),
+                depth=request.depth,
+            ),
+        )
 
-    # --- index chunk embeddings in Qdrant --------------------------------
-    if chunks and embeddings:
-        indexed = await guarded_step(
+    async def index_chunks() -> Any:
+        if not chunks:
+            return None
+        try:
+            embeddings = await app.state.embedder.generate_dense_embeddings(chunks)
+        except Exception as exc:
+            job.errors.append(f"{url}: embedding failed ({exc})")
+            logger.exception("Failed to embed %s", url)
+            return None
+        if not embeddings:
+            return None
+        return await guarded_step(
             job, url, "qdrant indexing",
             app.state.qdrant.upsert_embeddings(
                 url=url,
@@ -388,32 +403,37 @@ async def process_page(
                 payload_extra={"title": title, "depth": request.depth},
             ),
         )
-        if indexed:
-            job.chunks_indexed += indexed
 
-    # --- extract structured knowledge with the LLM ------------------------
-    knowledge = app.state.extractor.empty_result()
-    if app.state.extractor.is_available:
-        extracted = await guarded_step(
+    async def extract() -> Any:
+        if not app.state.extractor.is_available:
+            return None
+        return await guarded_step(
             job, url, "llm extraction",
             app.state.extractor.extract_knowledge(text_for_analysis),
         )
-        if extracted:
-            knowledge = extracted
 
+    page_id, indexed, extracted = await asyncio.gather(save_page(), index_chunks(), extract())
+    if page_id is not None:
+        job.pages_saved += 1
+    if indexed:
+        job.chunks_indexed += indexed
+
+    knowledge = extracted or app.state.extractor.empty_result()
     entities = knowledge.get("entities", [])
     triples = knowledge.get("triples", [])
     job.entities_extracted += len(entities)
 
-    # --- store entities in PostgreSQL ------------------------------------
-    if entities:
-        await guarded_step(
-            job, url, "entity insert",
-            app.state.postgres.insert_entities(page_id, entities, source_url=url),
-        )
+    # --- store entities (PostgreSQL) and the graph (Neo4j) concurrently ---
+    async def store_entities() -> None:
+        if entities:
+            await guarded_step(
+                job, url, "entity insert",
+                app.state.postgres.insert_entities(page_id, entities, source_url=url),
+            )
 
-    # --- store relations in Neo4j ----------------------------------------
-    if triples:
+    async def store_graph() -> None:
+        if not triples:
+            return
         await guarded_step(job, url, "neo4j page upsert",
                            app.state.neo4j.upsert_page(url, title=title, job_id=job.job_id))
         await guarded_step(job, url, "neo4j entity links",
@@ -428,6 +448,8 @@ async def process_page(
             ),
         )
         job.relations_written += written or 0
+
+    await asyncio.gather(store_entities(), store_graph())
 
     # --- discover links for the next depth level --------------------------
     if request.depth < request.max_depth and job.pages_crawled < CRAWL_MAX_PAGES:
@@ -494,6 +516,13 @@ async def run_crawl_pipeline(job: CrawlJob) -> None:
         job.started_at = time.time()
         host = urlparse(job.url).netloc
         robots = await load_robots(job.url)
+        # Link discovery checks robots.txt, but the seed URL was never checked.
+        if not is_allowed(robots, job.url):
+            job.status = "failed"
+            job.errors.append(f"robots.txt disallows {job.url}")
+            job.finished_at = time.time()
+            logger.info("Job %s: robots.txt disallows the seed %s", job.job_id, job.url)
+            return
         queue = RequestQueue()
         await queue.add(CrawlRequest(job.url, depth=0, max_depth=job.max_depth))
 
@@ -507,6 +536,7 @@ async def run_crawl_pipeline(job: CrawlJob) -> None:
             session_pool=SessionPool(),
             concurrency=CRAWL_PAGE_CONCURRENCY,
             max_memory_percent=CRAWL_MAX_MEMORY_PERCENT,
+            handler_timeout=PAGE_HANDLER_TIMEOUT,
         )
 
         async def handler(request: CrawlRequest, page: Any) -> None:
@@ -559,14 +589,9 @@ async def lifespan(application: FastAPI):
     application.state.tasks: Set[asyncio.Task] = set()
     application.state.crawl_slots = asyncio.Semaphore(MAX_CRAWL_CONCURRENCY)
 
-    for name, adapter in (
-        ("postgres", application.state.postgres),
-        ("qdrant", application.state.qdrant),
-        ("neo4j", application.state.neo4j),
-    ):
+    async def _connect(name: str, adapter: Any) -> None:
         try:
-            # Bounded: an unreachable backend must not stall startup. The
-            # connects run concurrently so total wait is one timeout, not three.
+            # Bounded: an unreachable backend must not stall startup.
             await asyncio.wait_for(adapter.connect(), timeout=STARTUP_CONNECT_TIMEOUT)
         except asyncio.TimeoutError:
             logger.error(
@@ -575,6 +600,13 @@ async def lifespan(application: FastAPI):
             )
         except Exception as exc:
             logger.error("Failed to connect to %s at startup: %s", name, exc)
+
+    # Concurrent, so the worst-case wait is one timeout rather than three.
+    await asyncio.gather(
+        _connect("postgres", application.state.postgres),
+        _connect("qdrant", application.state.qdrant),
+        _connect("neo4j", application.state.neo4j),
+    )
 
     if application.state.extractor.is_available:
         logger.info(

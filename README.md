@@ -206,6 +206,25 @@ The search box accepts a bare domain, a full URL, or an instruction with a URL
 in it (`extract pricing from stripe.com`); the prose is passed to the agent as
 the task.
 
+**Keeping it fast without faking it.** Every step really runs; speed comes
+from doing less redundant work:
+
+- Per page, the PostgreSQL save, embedding + Qdrant indexing and LLM
+  extraction run concurrently, so a page costs its slowest step, not the sum.
+- LLM results are cached by content hash (`LLM_CACHE_SIZE`, default 256), so
+  a rehearsal re-crawl of the demo site skips repeat model calls. The cache is
+  in memory: restart the server for a cold run.
+- For a hosted model, a small fast one keeps latency low on Groq's free tier:
+
+  ```bash
+  GROQ_API_KEY=...                     # from console.groq.com, never committed
+  MODEL_NAME=llama-3.1-8b-instant
+  CRAWL_MAX_PAGES=10                   # a short, honest crawl for a live demo
+  ```
+
+- Start the datastores before the server: with them down every write waits
+  out its timeout and `/api/v1/health` reports the service as degraded.
+
 Counters on a finished job only ever report work that was actually persisted:
 `entities_extracted` counts what the model returned, while `pages_saved`,
 `chunks_indexed` and `relations_written` count what the stores accepted. If a

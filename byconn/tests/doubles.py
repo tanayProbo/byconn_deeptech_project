@@ -144,7 +144,8 @@ class FakePostgres:
         if self.fail:
             raise ConnectionRefusedError("postgres down")
         self.pages.append(dict(url=url, markdown=markdown, title=title, job_id=job_id,
-                               chunk_count=chunk_count, depth=depth))
+                               chunk_count=chunk_count, depth=depth,
+                               status_code=status_code))
         return 1000 + len(self.pages)
 
     async def insert_entities(self, page_id, entities, source_url: str = "") -> int:

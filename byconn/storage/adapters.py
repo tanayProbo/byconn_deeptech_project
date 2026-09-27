@@ -464,7 +464,7 @@ class PostgresAdapter(BaseAdapter):
         title: str = "",
         job_id: str = "",
         chunk_count: int = 0,
-        status_code: int = 200,
+        status_code: Optional[int] = 200,
         depth: int = 0,
         content_hash: str = "",
     ) -> int:
