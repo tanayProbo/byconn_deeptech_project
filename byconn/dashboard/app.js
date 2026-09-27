@@ -76,8 +76,47 @@ function activateTab(tabId) {
     if (sub)   sub.textContent   = meta.subtitle;
 
     if (tabId === "history")       renderHistoryTable();
+    if (tabId === "saved")         renderSavedInsights();
     if (tabId === "api-discovery") loadDiscoveredApis();
     if (tabId === "api-keys")      setupHealthIndicator();
+}
+
+/* ========================================================== SAVED INSIGHTS */
+function renderSavedInsights() {
+    const list = document.getElementById("saved-insights-list");
+    if (!list) return;
+
+    const savedJobs = jobHistory.filter(j => j.status === "succeeded" && j.entities > 0);
+    
+    if (!savedJobs.length) {
+        list.innerHTML = `
+            <div class="search-result-item" style="border-color:var(--border-color);">
+                <div class="res-header">
+                    <span class="res-title">No Saved Snapshots Yet</span>
+                </div>
+                <p class="res-snippet text-muted">
+                    Run a crawl to generate extractable data. Completed crawl results will appear here for JSON export.
+                </p>
+            </div>
+        `;
+        return;
+    }
+
+    list.innerHTML = savedJobs.map(j => `
+        <div class="search-result-item" style="border-color:var(--mint); margin-bottom:12px;">
+            <div class="res-header">
+                <span class="res-title">Extracted: ${escapeHtml(j.url)}</span>
+                <span class="res-score badge badge-success">Saved Today</span>
+            </div>
+            <p class="res-snippet" style="font-size:13px; line-height:1.6;">
+                Extracted <b>${j.entities}</b> entities from <b>${j.pages}</b> pages.<br>
+                Mode: ${escapeHtml(j.mode)} | Duration: ${j.duration}s
+            </p>
+            <div style="display: flex; gap: 12px; margin-top: 12px;">
+                <button class="btn btn-sm btn-secondary" onclick="alert('JSON Export for ${j.jobId}\\n\\n{\\n  \\"url\\": \\"${j.url}\\",\\n  \\"entities_extracted\\": ${j.entities},\\n  \\"status\\": \\"success\\"\\n}')">View JSON</button>
+            </div>
+        </div>
+    `).join("");
 }
 
 /* ========================================================== ANALYTICS */

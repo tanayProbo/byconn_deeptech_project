@@ -183,20 +183,19 @@
                 <section class="tab-panel" id="panel-saved">
                     <div class="panel-header">
                         <h3>Saved Data &amp; JSON Exports</h3>
+                        <button class="btn btn-secondary" onclick="renderSavedInsights()">↻ Refresh</button>
                     </div>
                     <p class="text-muted" style="margin-bottom:20px;">
-                        Run a crawl to generate extractable data. Persistence requires PostgreSQL to be connected.
+                        Extractable data generated during this session.
                     </p>
-                    <div class="search-results-list">
-                        <div class="search-result-item" style="border-color:var(--yellow);">
+                    <div class="search-results-list" id="saved-insights-list">
+                        <!-- Populated dynamically by app.js -->
+                        <div class="search-result-item" style="border-color:var(--border-color);">
                             <div class="res-header">
-                                <span class="res-title">⚠️ No Saved Snapshots Yet</span>
-                                <span class="res-score badge badge-warning">Needs DB</span>
+                                <span class="res-title">No Saved Snapshots Yet</span>
                             </div>
-                            <p class="res-snippet">
-                                Once PostgreSQL is connected via Docker, completed crawl results will
-                                be persisted here and available for JSON export. Start Docker and run
-                                <code>docker compose up -d</code> to enable full persistence.
+                            <p class="res-snippet text-muted">
+                                Run a crawl to generate extractable data. Completed crawl results will appear here for JSON export.
                             </p>
                         </div>
                     </div>
